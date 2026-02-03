@@ -1,0 +1,31 @@
+# Build output + archives
+/src/build/
+/src/backups/
+/src/build/archive/
+/src/build/*.exe
+/src/build/*.obj
+/src/build/*.pdb
+/src/build/*.ilk
+/src/build/*.ipch
+/src/build/*.pch
+/src/build/*.tlog
+/src/build/*.idb
+/src/build/*.iobj
+/src/build/*.ipdb
+
+# Visual Studio workspace
+/src/build/.vs/
+/.vs/
+
+# Generic
+*.exe
+*.obj
+*.pdb
+*.ilk
+*.ipch
+*.pch
+*.tlog
+*.idb
+*.iobj
+*.ipdb
+*.md
