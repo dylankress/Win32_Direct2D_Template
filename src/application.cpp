@@ -39,11 +39,13 @@ ID2D1SolidColorBrush *p_brush;
 // DirectWrite resources
 IDWriteFactory *p_dwrite_factory;
 IDWriteTextFormat *p_text_format_default;
+IDWriteTextFormat *p_text_format_monospace;  // 14pt Consolas/Courier New
 
 // Text format cache (for performance)
 struct Text_Format_Cache {
 	IDWriteTextFormat *formats[APP_MAX_TEXT_FORMATS];
 	int sizes[APP_MAX_TEXT_FORMATS];
+	int styles[APP_MAX_TEXT_FORMATS];  // 0=Segoe UI, 1=monospace
 	int count;
 };
 Text_Format_Cache g_text_format_cache;
@@ -69,11 +71,12 @@ Frame_Timer g_frame_timer;
 
 // .............................................................................................
 IDWriteTextFormat*
-Get_Text_Format(int font_size)
+Get_Text_Format(int font_size, int font_style)
 {
-	// Check cache
+	// Check cache (must match BOTH size and style)
 	for (int i = 0; i < g_text_format_cache.count; i++) {
-		if (g_text_format_cache.sizes[i] == font_size) {
+		if (g_text_format_cache.sizes[i] == font_size && 
+		    g_text_format_cache.styles[i] == font_style) {
 			return g_text_format_cache.formats[i];
 		}
 	}
@@ -81,8 +84,16 @@ Get_Text_Format(int font_size)
 	// Create new format if not cached
 	if (g_text_format_cache.count < APP_MAX_TEXT_FORMATS) {
 		IDWriteTextFormat *fmt;
+		
+		// Choose font family based on style
+		const wchar_t *font_family = L"Segoe UI";
+		if (font_style == 1) {
+			// Try Consolas first (common on Windows), fall back to Courier New
+			font_family = L"Consolas";
+		}
+		
 		HRESULT hr = p_dwrite_factory->CreateTextFormat(
-			L"Segoe UI",
+			font_family,
 			NULL,
 			DWRITE_FONT_WEIGHT_NORMAL,
 			DWRITE_FONT_STYLE_NORMAL,
@@ -92,10 +103,25 @@ Get_Text_Format(int font_size)
 			&fmt
 		);
 		
+		// If Consolas failed, try Courier New
+		if (FAILED(hr) && font_style == 1) {
+			hr = p_dwrite_factory->CreateTextFormat(
+				L"Courier New",
+				NULL,
+				DWRITE_FONT_WEIGHT_NORMAL,
+				DWRITE_FONT_STYLE_NORMAL,
+				DWRITE_FONT_STRETCH_NORMAL,
+				(float)font_size,
+				L"en-us",
+				&fmt
+			);
+		}
+		
 		if (SUCCEEDED(hr)) {
 			int idx = g_text_format_cache.count++;
 			g_text_format_cache.formats[idx] = fmt;
 			g_text_format_cache.sizes[idx] = font_size;
+			g_text_format_cache.styles[idx] = font_style;
 			return fmt;
 		}
 	}
@@ -117,8 +143,8 @@ App_Measure_Text(const char *text, int font_size)
 	wchar_t wtext[MAX_UI_TEXT_LENGTH];
 	MultiByteToWideChar(CP_UTF8, 0, text, -1, wtext, MAX_UI_TEXT_LENGTH);
 	
-	// Get text format
-	IDWriteTextFormat *fmt = Get_Text_Format(font_size);
+	// Get text format (default proportional font)
+	IDWriteTextFormat *fmt = Get_Text_Format(font_size, 0);
 	
 	// Create text layout for measurement
 	IDWriteTextLayout *layout;
@@ -133,6 +159,65 @@ App_Measure_Text(const char *text, int font_size)
 	
 	if (FAILED(hr)) {
 		UI_RectI fallback = {0, 0, 0, 20};
+		return fallback;
+	}
+	
+	// Get metrics
+	DWRITE_TEXT_METRICS metrics;
+	layout->GetMetrics(&metrics);
+	layout->Release();
+	
+	UI_RectI result;
+	result.x = 0;
+	result.y = 0;
+	result.w = (int)(metrics.width + 0.5f);
+	result.h = (int)(metrics.height + 0.5f);
+	return result;
+}
+
+
+// .............................................................................................
+UI_RectI
+App_Measure_Text_Monospace(const char *text, int font_size)
+{
+	if (!text || !p_dwrite_factory) {
+		UI_RectI fallback;
+		memset(&fallback, 0, sizeof(UI_RectI));
+		fallback.w = 100;
+		fallback.h = 20;
+		return fallback;
+	}
+	
+	// Convert UTF-8 to UTF-16
+	wchar_t wtext[MAX_UI_TEXT_LENGTH];
+	MultiByteToWideChar(CP_UTF8, 0, text, -1, wtext, MAX_UI_TEXT_LENGTH);
+	
+	// Get monospace text format (style=1)
+	IDWriteTextFormat *fmt = Get_Text_Format(font_size, 1);
+	if (!fmt) {
+		UI_RectI fallback;
+		memset(&fallback, 0, sizeof(UI_RectI));
+		fallback.w = 100;
+		fallback.h = 20;
+		return fallback;
+	}
+	
+	// Create text layout for measurement
+	IDWriteTextLayout *layout;
+	HRESULT hr = p_dwrite_factory->CreateTextLayout(
+		wtext,
+		(UINT32)wcslen(wtext),
+		fmt,
+		10000.0f,  // Max width (large number for single-line)
+		10000.0f,  // Max height
+		&layout
+	);
+	
+	if (FAILED(hr)) {
+		UI_RectI fallback;
+		memset(&fallback, 0, sizeof(UI_RectI));
+		fallback.w = 100;
+		fallback.h = 20;
 		return fallback;
 	}
 	
@@ -199,10 +284,14 @@ Render_UI_Text(UI_Render_List *render_list)
 		float b = ((c >>  0) & 0xFF) / 255.0f;
 		p_brush->SetColor(D2D1::ColorF(r, g, b, a));
 		
-		// Get text format (use cached or default)
-		IDWriteTextFormat *fmt = (src->font_size > 0) 
-			? Get_Text_Format(src->font_size)
-			: p_text_format_default;
+		// Get text format (use cached or default based on font style)
+		IDWriteTextFormat *fmt;
+		if (src->font_size > 0) {
+			fmt = Get_Text_Format(src->font_size, src->font_style);
+		} else {
+			// Use default format based on style
+			fmt = (src->font_style == 1) ? p_text_format_monospace : p_text_format_default;
+		}
 		
 		// Set alignment
 		DWRITE_TEXT_ALIGNMENT h_align;
@@ -542,6 +631,7 @@ MainWindowCallback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 			g_text_format_cache.count = 0;
 			
 			if (p_text_format_default) { p_text_format_default->Release(); p_text_format_default = 0; }
+			if (p_text_format_monospace) { p_text_format_monospace->Release(); p_text_format_monospace = 0; }
 			if (p_dwrite_factory) { p_dwrite_factory->Release(); p_dwrite_factory = 0; }
 			if (p_render_target) { p_render_target->Release(); p_render_target = 0; }
 			if (p_brush) { p_brush->Release(); p_brush = 0; }
@@ -650,11 +740,42 @@ WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR command_line, int
 				PostQuitMessage(1);
 				return 1;
 			}
-			else {
-				p_text_format_default->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-				p_text_format_default->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
-			}
-			
+		else {
+			p_text_format_default->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+			p_text_format_default->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+		}
+		
+		// Create monospace text format (Consolas 14pt)
+		HRESULT mono_result = p_dwrite_factory->CreateTextFormat(
+			L"Consolas",
+			NULL,
+			DWRITE_FONT_WEIGHT_NORMAL,
+			DWRITE_FONT_STYLE_NORMAL,
+			DWRITE_FONT_STRETCH_NORMAL,
+			14.0f,
+			L"en-us",
+			&p_text_format_monospace
+		);
+		
+		// Fallback to Courier New if Consolas not available
+		if (FAILED(mono_result)) {
+			mono_result = p_dwrite_factory->CreateTextFormat(
+				L"Courier New",
+				NULL,
+				DWRITE_FONT_WEIGHT_NORMAL,
+				DWRITE_FONT_STYLE_NORMAL,
+				DWRITE_FONT_STRETCH_NORMAL,
+				14.0f,
+				L"en-us",
+				&p_text_format_monospace
+			);
+		}
+		
+		if (SUCCEEDED(mono_result)) {
+			p_text_format_monospace->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+			p_text_format_monospace->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+		}
+		
 		// Initialize cache
 		g_text_format_cache.count = 0;
 	}
@@ -679,9 +800,9 @@ WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR command_line, int
 	// Initialize frame timing system
 	QueryPerformanceFrequency(&g_frame_timer.frequency);
 	QueryPerformanceCounter(&g_frame_timer.frame_start);
-	g_frame_timer.target_fps = 120;
-	g_frame_timer.target_frame_time_ms = 1000.0 / 120.0;  // ~8.33ms
-	g_frame_timer.actual_fps = 120;
+	g_frame_timer.target_fps = 240;
+	g_frame_timer.target_frame_time_ms = 1000.0 / g_frame_timer.target_fps;
+	g_frame_timer.actual_fps = 0;
 	g_frame_timer.fps_update_timer = 0.0;
 	g_frame_timer.frame_count_for_fps = 0;
 
@@ -704,7 +825,6 @@ WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR command_line, int
 				DispatchMessageW(&message);
 			}
 			
-			// Render frame at 120 FPS
 			Render(window);
 			
 			// Wait for target frame time (precise pacing)

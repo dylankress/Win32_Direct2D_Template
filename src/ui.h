@@ -104,6 +104,7 @@ struct UI_Text {
 	uint32_t color;
 	char text[MAX_UI_TEXT_LENGTH];
 	int font_size;
+	int font_style;  // 0=Segoe UI (default), 1=Consolas/Courier New (monospace)
 	int align_h;
 	int align_v;
 };
@@ -153,6 +154,7 @@ struct UI_Panel {
 	// Label metadata (if this panel is a label)
 	char label_text[MAX_UI_TEXT_LENGTH];
 	uint32_t label_color;
+	int label_font_style;  // 0=default, 1=monospace
 	int is_label;
 };
 
@@ -282,6 +284,7 @@ void UI_Divider_Ex(UI_Context *ui, const char *id, int orientation, uint32_t col
 
 // Widgets
 void UI_Label(UI_Context *ui, const char *text, uint32_t color);
+void UI_Label_Monospace(UI_Context *ui, const char *text, uint32_t color);
 int UI_Button(UI_Context *ui, const char *text);
 
 // Input system

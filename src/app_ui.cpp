@@ -141,7 +141,7 @@ App_Sidebar_Right(UI_Context *ui)
 		UI_Label(ui, "Properties", 0xFFFFFFFF);
 		UI_Label(ui, "Width: 1920", 0xFFAAAAAA);
 		UI_Label(ui, "Height: 1080", 0xFFAAAAAA);
-		UI_Label(ui, "FPS: 60", 0xFFAAAAAA);
+		UI_Label(ui, "DPI: 300", 0xFFAAAAAA);
 	}
 	UI_End_Panel(ui);
 }

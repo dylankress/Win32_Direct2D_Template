@@ -99,7 +99,7 @@ UI_Add_Rectangle(int l, int t, int r, int b, uint32_t color)
 // .............................................................................................
 static void
 UI_Add_Text(int x, int y, int w, int h, const char *text_str, 
-            uint32_t color, int font_size, int align_h, int align_v)
+            uint32_t color, int font_size, int font_style, int align_h, int align_v)
 {
 	if (!g_render_list) return;
 	assert(g_render_list->text_count < UI_MAX_TEXTS && "Text buffer overflow");
@@ -122,6 +122,7 @@ UI_Add_Text(int x, int y, int w, int h, const char *text_str,
 	dst->text[len] = 0;
 	
 	dst->font_size = font_size;
+	dst->font_style = font_style;
 	dst->align_h = align_h;
 	dst->align_v = align_v;
 }
@@ -378,6 +379,7 @@ static void UI_Emit_Panels(UI_State *s, int panel_idx)
             p->label_text,
             p->label_color,
             14,
+            p->label_font_style,
             UI_ALIGN_START,
             UI_ALIGN_CENTER
         );
@@ -740,6 +742,45 @@ UI_Label(UI_Context *ui, const char *text, uint32_t color)
 		panel->style.color = 0x00000000;
 		panel->is_label = 1;
 		panel->label_color = color;
+		panel->label_font_style = 0;  // Default font
+		
+		int len = 0;
+		while (len < MAX_UI_TEXT_LENGTH - 1 && text[len]) {
+			panel->label_text[len] = text[len];
+			len++;
+		}
+		panel->label_text[len] = 0;
+	}
+	
+	UI_End_Panel(ui);
+}
+
+
+// .............................................................................................
+void
+UI_Label_Monospace(UI_Context *ui, const char *text, uint32_t color)
+{
+	if (!text) return;
+	
+	// Approximate monospace width: average ~8.5 pixels per character for Consolas 14pt
+	int char_count = 0;
+	while (text[char_count] != 0 && char_count < MAX_UI_TEXT_LENGTH - 1) {
+		char_count++;
+	}
+	int approx_width = char_count * 9;  // 9px per char is conservative estimate
+	int approx_height = 20;              // 14pt ~ 19-20px tall
+	
+	UI_Begin_Panel(ui, text);
+	UI_Panel_Set_Size(ui, approx_width + 2, approx_height);
+	
+	if (ui->parent_stack_count > 0) {
+		int panel_idx = ui->parent_stack[ui->parent_stack_count - 1];
+		UI_Panel *panel = &ui->state.panels[panel_idx];
+		
+		panel->style.color = 0x00000000;
+		panel->is_label = 1;
+		panel->label_color = color;
+		panel->label_font_style = 1;  // Monospace
 		
 		int len = 0;
 		while (len < MAX_UI_TEXT_LENGTH - 1 && text[len]) {
@@ -1439,7 +1480,7 @@ UI_Debug_Mouse_Overlay(UI_Context *ui)
 	// Build line 1 - input & timing state
 	char line1[512];
 	snprintf(line1, sizeof(line1), 
-	         "Frame:%d %.2fms | %d FPS | Mouse:(%d,%d) | Down L:%d R:%d M:%d | Press L:%d R:%d M:%d | Release L:%d R:%d M:%d | Char:'%c'",
+	         "Frame:%6d %6.2fms | %3d FPS | Mouse:(%4d,%4d) | Down L:%d R:%d M:%d | Press L:%d R:%d M:%d | Release L:%d R:%d M:%d | Char:'%c'",
 	         ui->frame_number,
 	         ui->delta_time_ms,
 	         ui->current_fps,
@@ -1482,13 +1523,13 @@ UI_Debug_Mouse_Overlay(UI_Context *ui)
 	
 	// Create debug overlay panel (COLUMN direction for vertical stacking)
 	UI_Begin_Panel(ui, "##debug_overlay");
-	UI_Panel_Set_Size(ui, max_width + 16, total_height + 8);
+	UI_Panel_Set_Size(ui, 1100, total_height + 8);
 	UI_Panel_Set_Color(ui, 0xEE000000);
 	UI_Panel_Set_Padding(ui, 8, 4, 8, 4);
 	UI_Panel_Set_Direction(ui, UI_DIRECTION_COLUMN);
 	UI_Panel_Set_Gap(ui, 2);
-		UI_Label(ui, line1, 0xFF00FF00);
-		UI_Label(ui, line2, 0xFF00FF00);
+		UI_Label_Monospace(ui, line1, 0xFF00FF00);
+		UI_Label_Monospace(ui, line2, 0xFF00FF00);
 	UI_End_Panel(ui);
 }
 

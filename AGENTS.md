@@ -6,16 +6,16 @@ This document provides coding agents with essential information about this codeb
 
 ## Project Overview
 
-This is a minimal Windows Direct2D application template with a custom immediate-mode UI system. The codebase is intentionally simple (~2689 lines total) with no external dependencies beyond Windows SDK.
+This is a minimal Windows Direct2D application template with a custom immediate-mode UI system. The codebase is intentionally simple (~2874 lines total) with no external dependencies beyond Windows SDK.
 
 **Current Line Counts (as of last update):**
-- `ui.h`: 328 lines (UI library interface)
-- `ui.cpp`: 1487 lines (UI library implementation)
+- `ui.h`: 331 lines (UI library interface)
+- `ui.cpp`: 1539 lines (UI library implementation)
 - `app_ui.h`: 10 lines (User UI header)
 - `app_ui.cpp`: 147 lines (User UI implementation - demo)
-- `application.cpp`: 707 lines (Application entry point)
+- `application.cpp`: 837 lines (Application entry point)
 - `build.bat`: 10 lines (Build script)
-- **Total**: 2689 lines
+- **Total**: 2874 lines
 
 **Key Technologies:**
 - Language: C++ (Windows-specific)
@@ -303,6 +303,44 @@ UI_End_Panel(ui);
 - `gap == -1`: Skip setting gap
 - `color == 0`: Skip setting color
 
+## Monospace Text Support
+
+The UI library supports monospace fonts (Consolas/Courier New) for displaying code, logs, or debug information where character alignment is important.
+
+**API:**
+```c
+UI_Label_Monospace(ui, "Frame: 1234 | FPS: 120", 0xFFFFFFFF);
+```
+
+**Font Selection Strategy:**
+1. Attempts Consolas (default Windows monospace font)
+2. Falls back to Courier New if Consolas unavailable
+3. Falls back to Segoe UI if neither available
+
+**Use Cases:**
+- Debug overlays (frame timers, FPS counters, mouse coordinates)
+- Log windows and console output
+- Code editors or syntax-highlighted text
+- Tabular data where column alignment matters
+
+**Implementation Details:**
+- Font style tracked via `UI_Text.font_style` field (0=proportional, 1=monospace)
+- Text format cache stores formats by both size AND style
+- Monospace text measurement available via `App_Measure_Text_Monospace()` (application.cpp)
+- Width approximation: ~9px per character for Consolas 14pt
+
+**Example - Debug Panel:**
+```c
+void UI_Debug_Mouse_Overlay(UI_Context *ui) {
+    char debug_info[512];
+    snprintf(debug_info, sizeof(debug_info), 
+             "Frame:%6d | FPS:%3d | Mouse:(%4d,%4d)",
+             frame, fps, mouse_x, mouse_y);
+    
+    UI_Label_Monospace(ui, debug_info, 0xFF00FF00);
+}
+```
+
 ## Resizable Dividers
 
 Dividers are 1px panels with `resizable` flag and expanded hitbox for easy grabbing.
@@ -358,11 +396,11 @@ Direct2D_ProjectTemplate/
 ├── LICENSE
 ├── .gitignore
 └── src/
-    ├── ui.h            (UI library interface, 328 lines)
-    ├── ui.cpp          (UI library implementation, 1487 lines)
+    ├── ui.h            (UI library interface, 331 lines)
+    ├── ui.cpp          (UI library implementation, 1539 lines)
     ├── app_ui.h        (User UI header, 10 lines)
     ├── app_ui.cpp      (User UI implementation, 147 lines)
-    ├── application.cpp (Application entry point, 707 lines)
+    ├── application.cpp (Application entry point, 837 lines)
     ├── build.bat       (Build script, 10 lines)
     └── build/          (Build artifacts - gitignored)
         └── application.exe
