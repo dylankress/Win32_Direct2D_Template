@@ -1,6 +1,22 @@
-// ui.cpp
+// ui.cpp - UI library implementation
+//
+// ARCHITECTURE:
+// 1. Panel Tree Construction: Immediate-mode API builds tree each frame
+// 2. Layout Calculation: Flexbox-inspired two-pass algorithm
+//    - Pass 1: Calculate fixed sizes and sum flex-grow factors
+//    - Pass 2: Distribute remaining space proportionally to flex-grow
+// 3. Render List Generation: Walk tree and emit rectangle/text primitives
+// 4. Input Processing: Mouse/keyboard state management and edge detection
+// 5. Interaction System: Hot/active widget tracking with resizable divider support
+//
+// PERFORMANCE NOTES:
+// - Panel lookup is O(n) linear search (acceptable for <100 panels, optimize if needed)
+// - Size override lookup is O(n) linear search (max 32 overrides)
+// - ID deduplication is O(n) per widget (could use hash map if needed)
+//
 #include "ui.h"
 #include <string.h>
+#include <assert.h>
 
 
 // internal per-frame pointer (not visible outside UI)
@@ -8,6 +24,9 @@ static UI_Render_List *g_render_list;
 
 
 // .............................................................................................
+// UI_HashString - Hash a string to a 32-bit ID using djb2 algorithm
+// djb2 is chosen for its simplicity, speed, and good distribution for short strings
+// Returns 0 for NULL input (used as sentinel "no ID" value)
 static UI_Id
 UI_HashString(const char *str)
 {
@@ -16,13 +35,21 @@ UI_HashString(const char *str)
 	UI_Id hash = 5381;
 	int c;
 	while ((c = *str++))
-		hash = ((hash << 5) + hash) + c;
+		hash = ((hash << 5) + hash) + c;  // hash * 33 + c
 	
 	return hash;
 }
 
 
 // .............................................................................................
+// UI_Generate_Id - Generate unique IDs for immediate-mode widgets with automatic deduplication
+// 
+// In immediate-mode, multiple widgets with the same label (e.g., "Save") need unique IDs.
+// First occurrence: "Save" -> hash("Save")
+// Second occurrence: "Save" -> hash("Save##0")
+// Third occurrence: "Save" -> hash("Save##1"), etc.
+// 
+// This allows natural API: UI_Button(ui, "Save") without manual ID management
 static UI_Id
 UI_Generate_Id(UI_Context *ctx, const char *str)
 {
@@ -42,7 +69,7 @@ UI_Generate_Id(UI_Context *ctx, const char *str)
 	}
 	
 	// First use - track it
-	if (ctx->used_id_count < 1024) {
+	if (ctx->used_id_count < UI_MAX_USED_IDS) {
 		ctx->used_ids[ctx->used_id_count] = base_id;
 		ctx->used_id_counts[ctx->used_id_count] = 0;
 		ctx->used_id_count++;
@@ -54,10 +81,11 @@ UI_Generate_Id(UI_Context *ctx, const char *str)
 
 // .............................................................................................
 static void
-UI_AddRectangle(int l, int t, int r, int b, uint32_t color)
+UI_Add_Rectangle(int l, int t, int r, int b, uint32_t color)
 {
 	if (!g_render_list) return;
-	if (g_render_list->rect_count >= MAX_UI_RECTANGLES) return;
+	assert(g_render_list->rect_count < UI_MAX_RECTANGLES && "Rectangle buffer overflow");
+	if (g_render_list->rect_count >= UI_MAX_RECTANGLES) return;  // Silent fail in release
 
 	UI_Rectangle *dst = &g_render_list->rectangles[g_render_list->rect_count++];
 	dst->left = l;
@@ -70,11 +98,12 @@ UI_AddRectangle(int l, int t, int r, int b, uint32_t color)
 
 // .............................................................................................
 static void
-UI_AddText(int x, int y, int w, int h, const char *text_str, 
-           uint32_t color, int font_size, int align_h, int align_v)
+UI_Add_Text(int x, int y, int w, int h, const char *text_str, 
+            uint32_t color, int font_size, int align_h, int align_v)
 {
 	if (!g_render_list) return;
-	if (g_render_list->text_count >= MAX_UI_TEXTS) return;
+	assert(g_render_list->text_count < UI_MAX_TEXTS && "Text buffer overflow");
+	if (g_render_list->text_count >= UI_MAX_TEXTS) return;  // Silent fail in release
 	if (!text_str) return;
 
 	UI_Text *dst = &g_render_list->texts[g_render_list->text_count++];
@@ -100,12 +129,16 @@ UI_AddText(int x, int y, int w, int h, const char *text_str,
 
 // .............................................................................................
 static int
-UI_NewPanel(UI_State *s, UI_Id id)
+UI_New_Panel(UI_State *s, UI_Id id)
 {
+	assert(s != NULL && "UI_State is NULL");
+	assert(s->panel_count < UI_MAX_PANELS && "Panel array overflow - increase UI_MAX_PANELS");
+	
 	if (s->panel_count >= (int)(sizeof(s->panels)/sizeof(s->panels[0]))) return -1;
 
 	int idx = s->panel_count++;
 	UI_Panel *p = &s->panels[idx];
+	assert(idx >= 0 && idx < UI_MAX_PANELS && "Panel index out of bounds");
 	memset(p, 0, sizeof(UI_Panel));
 
 	p->id = id;
@@ -141,8 +174,12 @@ UI_NewPanel(UI_State *s, UI_Id id)
 
 
 // .............................................................................................
-static void UI_AddChild(UI_State *s, int parent_idx, int child_idx)
+static void UI_Add_Child(UI_State *s, int parent_idx, int child_idx)
 {
+	assert(s != NULL && "UI_State is NULL");
+	assert(parent_idx >= 0 && parent_idx < s->panel_count && "Parent panel index out of bounds");
+	assert(child_idx >= 0 && child_idx < s->panel_count && "Child panel index out of bounds");
+	
     UI_Panel *parent = &s->panels[parent_idx];
     UI_Panel *child  = &s->panels[child_idx];
 
@@ -163,7 +200,15 @@ static void UI_AddChild(UI_State *s, int parent_idx, int child_idx)
 
 
 // .............................................................................................
-static void UI_LayoutRow(UI_State *s, int panel_idx)
+// UI_LayoutRow - Layout children horizontally using flexbox-inspired algorithm
+// 
+// TWO-PASS ALGORITHM:
+// Pass 1: Calculate total fixed width and sum flex-grow factors
+// Pass 2: Distribute remaining space proportionally to flex-grow factors
+//
+// Children fill full height of parent (minus padding)
+// Width is either fixed (pref_w >= 0) or flex-grow proportion of remaining space
+static void UI_Layout_Row(UI_State *s, int panel_idx)
 {
     UI_Panel *p = &s->panels[panel_idx];
 
@@ -175,7 +220,7 @@ static void UI_LayoutRow(UI_State *s, int panel_idx)
     if (cw < 0) cw = 0;
     if (ch < 0) ch = 0;
 
-    // First pass: count children, sum fixed widths, sum flex grow
+    // PASS 1: Count children, sum fixed widths, sum flex grow factors
     int child_count = 0;
     int fixed_sum = 0;
     float grow_sum = 0.0f;
@@ -197,7 +242,7 @@ static void UI_LayoutRow(UI_State *s, int panel_idx)
     int remaining = cw - fixed_sum - gaps_total;
     if (remaining < 0) remaining = 0;
 
-    // Second pass: assign child rects
+    // PASS 2: Assign child rectangles (distribute remaining space)
     int cursor_x = x0;
 
     for (int c = p->first_child; c != -1; c = s->panels[c].next_sibling)
@@ -226,7 +271,9 @@ static void UI_LayoutRow(UI_State *s, int panel_idx)
 
 
 // .............................................................................................
-static void UI_LayoutColumn(UI_State *s, int panel_idx)
+// UI_LayoutColumn - Layout children vertically using flexbox-inspired algorithm
+// Same as UI_LayoutRow but in vertical direction (children fill full width, height varies)
+static void UI_Layout_Column(UI_State *s, int panel_idx)
 {
     UI_Panel *p = &s->panels[panel_idx];
 
@@ -288,31 +335,31 @@ static void UI_LayoutColumn(UI_State *s, int panel_idx)
 
 
 // .............................................................................................
-static void UI_LayoutPanelTree(UI_State *s, int panel_idx)
+static void UI_Layout_Panel_Tree(UI_State *s, int panel_idx)
 {
     UI_Panel *p = &s->panels[panel_idx];
 
-    // Layout this container’s children based on its direction
+    // Layout this container's children based on its direction
     if (p->first_child != -1)
     {
-        if (p->style.direction == 0)      UI_LayoutRow(s, panel_idx);
-		else if (p->style.direction == 1) UI_LayoutColumn(s, panel_idx);
+        if (p->style.direction == 0)      UI_Layout_Row(s, panel_idx);
+		else if (p->style.direction == 1) UI_Layout_Column(s, panel_idx);
 
         // Recurse into children
         for (int c = p->first_child; c != -1; c = s->panels[c].next_sibling)
-            UI_LayoutPanelTree(s, c);
+            UI_Layout_Panel_Tree(s, c);
     }
 }
 
 
 // .............................................................................................
-static void UI_EmitPanels(UI_State *s, int panel_idx)
+static void UI_Emit_Panels(UI_State *s, int panel_idx)
 {
     UI_Panel *p = &s->panels[panel_idx];
 
     // Emit this panel's rect (skip if transparent and is label)
     if (!(p->is_label && p->style.color == 0x00000000)) {
-        UI_AddRectangle(
+        UI_Add_Rectangle(
             p->rect.x,
             p->rect.y,
             p->rect.x + p->rect.w,
@@ -323,7 +370,7 @@ static void UI_EmitPanels(UI_State *s, int panel_idx)
     
     // Emit label text if this is a label panel
     if (p->is_label && p->label_text[0] != 0) {
-        UI_AddText(
+        UI_Add_Text(
             p->rect.x,
             p->rect.y,
             p->rect.w,
@@ -338,21 +385,21 @@ static void UI_EmitPanels(UI_State *s, int panel_idx)
 
     // Emit children
     for (int c = p->first_child; c != -1; c = s->panels[c].next_sibling)
-        UI_EmitPanels(s, c);
+        UI_Emit_Panels(s, c);
 }
 
 
 // .............................................................................................
 void
-UI_BeginFrame(UI_Context *ui, UI_Render_List *out_list, int w, int h)
+UI_Begin_Frame(UI_Context *ui, UI_Render_List *out_list, int w, int h)
 {
-	UI_BeginFrame_WithTime(ui, out_list, w, h, 0.0f);
+	UI_Begin_Frame_With_Time(ui, out_list, w, h, 0.0f);
 }
 
 
 // .............................................................................................
 void
-UI_BeginFrame_WithTime(UI_Context *ui, UI_Render_List *out_list, int w, int h, float delta_time_ms)
+UI_Begin_Frame_With_Time(UI_Context *ui, UI_Render_List *out_list, int w, int h, float delta_time_ms)
 {
 	// Store previous frame interaction state
 	ui->interaction.hot_widget_prev = ui->interaction.hot_widget;
@@ -369,7 +416,7 @@ UI_BeginFrame_WithTime(UI_Context *ui, UI_Render_List *out_list, int w, int h, f
     ui->state.panel_count = 0;
 
 	// reset render list for this frame
-	*out_list = {};
+	memset(out_list, 0, sizeof(UI_Render_List));
 	g_render_list = out_list;
 	
 	// Reset immediate-mode state
@@ -385,7 +432,8 @@ UI_BeginFrame_WithTime(UI_Context *ui, UI_Render_List *out_list, int w, int h, f
 UI_Panel_Style
 UI_Default_Panel_Style(void)
 {
-	UI_Panel_Style s = {};
+	UI_Panel_Style s;
+	memset(&s, 0, sizeof(UI_Panel_Style));
 	s.color = 0xFF222222;
 	s.min_w = 0;
 	s.max_w = INT32_MAX;
@@ -408,7 +456,7 @@ void
 UI_Begin_Panel(UI_Context *ctx, const char *id_str)
 {
 	UI_Id id = UI_Generate_Id(ctx, id_str);
-	int panel_idx = UI_NewPanel(&ctx->state, id);
+	int panel_idx = UI_New_Panel(&ctx->state, id);
 	
 	if (panel_idx < 0) return;
 	
@@ -417,7 +465,7 @@ UI_Begin_Panel(UI_Context *ctx, const char *id_str)
 	                 : -1;
 	
 	if (parent_idx >= 0) {
-		UI_AddChild(&ctx->state, parent_idx, panel_idx);
+		UI_Add_Child(&ctx->state, parent_idx, panel_idx);
 	} else {
 		ctx->state.panels[panel_idx].rect.x = 0;
 		ctx->state.panels[panel_idx].rect.y = 0;
@@ -425,7 +473,7 @@ UI_Begin_Panel(UI_Context *ctx, const char *id_str)
 		ctx->state.panels[panel_idx].rect.h = ctx->screen_h;
 	}
 	
-	if (ctx->parent_stack_count < 32) {
+	if (ctx->parent_stack_count < UI_MAX_PARENT_STACK_DEPTH) {
 		ctx->parent_stack[ctx->parent_stack_count++] = panel_idx;
 	}
 }
@@ -435,7 +483,7 @@ UI_Begin_Panel(UI_Context *ctx, const char *id_str)
 void
 UI_Begin_Panel_With_Id(UI_Context *ctx, UI_Id id, const char *debug_name)
 {
-	int panel_idx = UI_NewPanel(&ctx->state, id);
+	int panel_idx = UI_New_Panel(&ctx->state, id);
 	
 	if (panel_idx < 0) return;
 	
@@ -444,7 +492,7 @@ UI_Begin_Panel_With_Id(UI_Context *ctx, UI_Id id, const char *debug_name)
 	                 : -1;
 	
 	if (parent_idx >= 0) {
-		UI_AddChild(&ctx->state, parent_idx, panel_idx);
+		UI_Add_Child(&ctx->state, parent_idx, panel_idx);
 	} else {
 		ctx->state.panels[panel_idx].rect.x = 0;
 		ctx->state.panels[panel_idx].rect.y = 0;
@@ -452,7 +500,7 @@ UI_Begin_Panel_With_Id(UI_Context *ctx, UI_Id id, const char *debug_name)
 		ctx->state.panels[panel_idx].rect.h = ctx->screen_h;
 	}
 	
-	if (ctx->parent_stack_count < 32) {
+	if (ctx->parent_stack_count < UI_MAX_PARENT_STACK_DEPTH) {
 		ctx->parent_stack[ctx->parent_stack_count++] = panel_idx;
 	}
 }
@@ -709,7 +757,7 @@ UI_Label(UI_Context *ui, const char *text, uint32_t color)
 void
 UI_Input_Init(UI_Input *input)
 {
-	*input = {};
+	memset(input, 0, sizeof(UI_Input));
 	input->mouse_x = 0;
 	input->mouse_y = 0;
 	input->mouse_x_prev = 0;
@@ -798,7 +846,7 @@ UI_Input_ProcessKey(UI_Context *ui, int vk_code, int down)
 void
 UI_Input_ProcessChar(UI_Context *ui, char c)
 {
-	if (ui->input.char_count < 32) {
+	if (ui->input.char_count < UI_MAX_CHAR_BUFFER) {
 		ui->input.char_buffer[ui->input.char_count++] = c;
 	}
 	ui->input.last_char = c;
@@ -963,7 +1011,7 @@ UI_Set_Size_Override(UI_Context *ui, UI_Id panel_id, int pref_w, int pref_h)
 	}
 	
 	// Add new override
-	if (ui->size_override_count < 32) {
+	if (ui->size_override_count < UI_MAX_SIZE_OVERRIDES) {
 		ui->size_overrides[ui->size_override_count].panel_id = panel_id;
 		ui->size_overrides[ui->size_override_count].pref_w = pref_w;
 		ui->size_overrides[ui->size_override_count].pref_h = pref_h;
@@ -1033,12 +1081,12 @@ UI_Get_Resize_Direction(UI_State *s, int panel_idx)
 static UI_RectI
 UI_Get_Expanded_Rect(UI_RectI rect, int padding)
 {
-	return UI_RectI{
-		rect.x - padding,
-		rect.y - padding,
-		rect.w + padding * 2,
-		rect.h + padding * 2
-	};
+	UI_RectI result;
+	result.x = rect.x - padding;
+	result.y = rect.y - padding;
+	result.w = rect.w + padding * 2;
+	result.h = rect.h + padding * 2;
+	return result;
 }
 
 
@@ -1077,12 +1125,27 @@ UI_Find_Next_Panel(UI_State *s, int divider_idx)
 
 
 // .............................................................................................
+// UI_Update_Divider_Resize - Handle resizable divider dragging with zero-sum constraint-aware resizing
+//
+// ZERO-SUM RESIZING:
+// When divider moves +10px right, left panel grows +10px and right panel shrinks -10px
+// Total space remains constant (zero-sum)
+//
+// CONSTRAINT HANDLING:
+// Panels have min/max size constraints. When a constraint is hit:
+// 1. Clamp the panel to its constraint
+// 2. Recalculate delta to maintain zero-sum with the other panel
+// Example: If left hits max 500px, delta is recalculated so right compensates
+//
+// PERSISTENT SIZING:
+// Size overrides are saved so panels remember their size across frame rebuilds
+// (Immediate-mode rebuilds tree every frame, but we want persistent sizing)
 static void
 UI_Update_Divider_Resize(UI_Context *ui)
 {
 	if (ui->interaction.dragging_divider == 0) return;
 	
-	// Look up both panels by ID each frame (indices are not stable in immediate-mode)
+	// Look up both panels by ID each frame (panel indices not stable in immediate-mode)
 	int left_idx = -1, right_idx = -1;
 	
 	if (ui->interaction.resize_target_left_id != 0) {
@@ -1409,8 +1472,9 @@ UI_Debug_Mouse_Overlay(UI_Context *ui)
 	);
 	
 	// Measure both lines
-	UI_RectI size1 = ui->measure_text ? ui->measure_text(line1, 14) : UI_RectI{0, 0, 800, 20};
-	UI_RectI size2 = ui->measure_text ? ui->measure_text(line2, 14) : UI_RectI{0, 0, 800, 20};
+	UI_RectI fallback_size = {0, 0, 800, 20};
+	UI_RectI size1 = ui->measure_text ? ui->measure_text(line1, 14) : fallback_size;
+	UI_RectI size2 = ui->measure_text ? ui->measure_text(line2, 14) : fallback_size;
 	
 	// Use max width for panel
 	int max_width = (size1.w > size2.w) ? size1.w : size2.w;

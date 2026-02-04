@@ -1,10 +1,63 @@
-// ui.h
+// ui.h - Immediate-mode UI library for Direct2D
+//
+// This is a retained-layout immediate-mode UI system designed for Direct2D rendering.
+//
+// ARCHITECTURE:
+// 1. Build Phase: Construct panel tree each frame using UI_Begin_Panel/UI_End_Panel
+// 2. Layout Phase: Calculate positions using flexbox-inspired algorithm (UI_LayoutPanelTree)
+// 3. Render Phase: Generate rectangles and text primitives (UI_EmitPanels)
+// 4. Draw Phase: Render primitives with Direct2D/DirectWrite (application-specific)
+//
+// KEY CONCEPTS:
+// - Panels: Rectangular containers with layout properties (row/column direction, padding, gaps)
+// - IDs: String-based identification with automatic deduplication (e.g., "Save" -> "Save##0", "Save##1")
+// - Parent Stack: Tracks current panel for automatic child parenting in immediate-mode API
+// - Size Modes: 
+//   * UI_SIZE_AUTO (-1): Auto-size based on content
+//   * UI_SIZE_FLEX (-2): Flex-grow to fill available space
+//   * Fixed pixels (>= 0): Explicit size with optional size overrides
+// - Size Overrides: Persistent sizing across frame rebuilds (enables resizable dividers)
+// - Flexbox Layout: Two-pass algorithm (fixed sizes first, then distribute remaining space to flex-grow)
+//
+// USAGE PATTERN:
+//   UI_Begin_Frame(&ctx, &render_list, width, height);
+//   UI_Begin_Panel(&ctx, "root"); 
+//     UI_Panel_Set_Direction(&ctx, UI_DIRECTION_COLUMN);
+//     UI_Label(&ctx, "Hello", 0xFFFFFFFF);
+//     if (UI_Button(&ctx, "Click")) { /* handle click */ }
+//   UI_End_Panel(&ctx);
+//   UI_LayoutPanelTree(&ctx.state, 0);
+//   UI_Update_Interaction(&ctx);
+//   UI_EmitPanels(&ctx.state, 0);
+//   // ... render render_list with Direct2D ...
+//   UI_Input_EndFrame(&ctx);
+//
 #pragma once
 #include <stdint.h>
 
-#define MAX_UI_RECTANGLES 256
-#define MAX_UI_TEXTS 256
-#define MAX_UI_TEXT_LENGTH 256
+// UI system capacity limits
+#define UI_MAX_PANELS 1024
+#define UI_MAX_PARENT_STACK_DEPTH 32
+#define UI_MAX_RECTANGLES 256
+#define UI_MAX_TEXTS 256
+#define UI_MAX_TEXT_LENGTH 256
+#define UI_MAX_USED_IDS 1024
+#define UI_MAX_SIZE_OVERRIDES 32
+#define UI_MAX_CHAR_BUFFER 32
+#define UI_KEY_COUNT 256
+#define UI_MOUSE_BUTTON_COUNT 3
+
+// Size sentinel values (for UI_Panel_Set_Size and helper functions)
+#define UI_SIZE_AUTO -1        // Auto-size based on content
+#define UI_SIZE_FLEX -2        // Flex-grow to fill available space
+
+// Text format cache capacity (application-specific)
+#define APP_MAX_TEXT_FORMATS 16
+
+// Legacy compatibility (keeping old names for now)
+#define MAX_UI_RECTANGLES UI_MAX_RECTANGLES
+#define MAX_UI_TEXTS UI_MAX_TEXTS
+#define MAX_UI_TEXT_LENGTH UI_MAX_TEXT_LENGTH
 
 enum UI_Direction {
 	UI_DIRECTION_ROW = 0,
@@ -26,12 +79,8 @@ enum UI_Divider_Orientation {
 enum UI_Mouse_Button {
 	UI_MOUSE_LEFT = 0,
 	UI_MOUSE_RIGHT = 1,
-	UI_MOUSE_MIDDLE = 2,
-	UI_MOUSE_BUTTON_COUNT = 3
+	UI_MOUSE_MIDDLE = 2
 };
-
-// Virtual key codes
-#define UI_KEY_COUNT 256
 
 // Helper key codes
 #define UI_KEY_TAB       0x09
@@ -72,21 +121,26 @@ struct UI_RectI { int x, y, w, h; };
 
 typedef UI_RectI (*UI_Text_Measure_Func)(const char *text, int font_size);
 
+// UI_Style - Layout and visual properties for a panel
+// Flexbox-inspired layout system with explicit size constraints
 struct UI_Style {
     uint32_t color;
 	int min_w, max_w;
     int min_h, max_h;
-    int pref_w, pref_h;
-    int pad_l, pad_t, pad_r, pad_b;
-    float flex_grow;
-    float flex_shrink;
-    int flex_basis;
-    int direction; // 0=row, 1=column
-    int gap;
+    int pref_w, pref_h;         // Preferred size (-1=auto, -2=flex-grow, >=0=fixed pixels)
+    int pad_l, pad_t, pad_r, pad_b;  // Padding (inner spacing)
+    float flex_grow;            // Flex-grow factor (0=no grow, 1.0=grow proportionally)
+    float flex_shrink;          // Flex-shrink factor (unused currently, reserved for future)
+    int flex_basis;             // Flex-basis (unused currently, reserved for future)
+    int direction;              // Layout direction: 0=row (horizontal), 1=column (vertical)
+    int gap;                    // Space between child panels
 	int resizable;              // 0 = not resizable, 1 = resizable
 	int resize_hitbox_padding;  // Extra pixels around divider for hitbox
 };
 
+// UI_Panel - A rectangular container in the panel tree
+// Tree structure: parent -> first_child -> next_sibling -> ...
+// Layout is calculated top-down based on parent's direction and child constraints
 struct UI_Panel {
     UI_Id id;
     UI_Style style;
@@ -103,7 +157,7 @@ struct UI_Panel {
 };
 
 struct UI_State {
-    UI_Panel panels[1024];
+    UI_Panel panels[UI_MAX_PANELS];
     int panel_count;
 };
 
@@ -126,7 +180,7 @@ struct UI_Input {
 	int key_released[UI_KEY_COUNT];
 	
 	// Character input
-	char char_buffer[32];
+	char char_buffer[UI_MAX_CHAR_BUFFER];
 	int char_count;
 	char last_char;
 	
@@ -136,13 +190,16 @@ struct UI_Input {
 	int alt;
 };
 
-// Widget interaction state
+// Widget interaction state - Tracks hot/active/focused widgets
+// Hot: Widget under mouse cursor (hover state)
+// Active: Widget being clicked/dragged (pressed state)
+// Focused: Widget with keyboard focus (for text input, etc.)
 struct UI_Interaction {
-	UI_Id hot_widget;
-	UI_Id hot_widget_prev;
-	UI_Id active_widget;
-	UI_Id active_widget_prev;
-	UI_Id focused_widget;
+	UI_Id hot_widget;           // Currently hovered widget
+	UI_Id hot_widget_prev;      // Previous frame's hot widget (for transition detection)
+	UI_Id active_widget;        // Currently active (pressed) widget
+	UI_Id active_widget_prev;   // Previous frame's active widget
+	UI_Id focused_widget;       // Widget with keyboard focus (unused currently)
 	UI_Id dragging_divider;      // Panel ID being dragged (0 if not)
 	int drag_start_pos;           // Initial mouse x or y
 	int drag_start_size_left;     // Left panel's starting size
@@ -152,6 +209,8 @@ struct UI_Interaction {
 };
 
 // Size override for persistent panel sizing across frame rebuilds
+// Needed because immediate-mode rebuilds the tree every frame, but we want
+// resizable dividers to remember their size between frames
 struct UI_Size_Override {
 	UI_Id panel_id;
 	int pref_w;
@@ -164,13 +223,13 @@ struct UI_Context {
 	UI_State state;
 	
 	// Immediate-mode API support
-	int parent_stack[32];
+	int parent_stack[UI_MAX_PARENT_STACK_DEPTH];
 	int parent_stack_count;
 	UI_Text_Measure_Func measure_text;
 	
 	// ID deduplication
-	UI_Id used_ids[1024];
-	int used_id_counts[1024];
+	UI_Id used_ids[UI_MAX_USED_IDS];
+	int used_id_counts[UI_MAX_USED_IDS];
 	int used_id_count;
 	
 	// Input state
@@ -179,7 +238,7 @@ struct UI_Context {
 	UI_Interaction interaction;
 	
 	// Size overrides (persist across frame rebuilds)
-	UI_Size_Override size_overrides[32];
+	UI_Size_Override size_overrides[UI_MAX_SIZE_OVERRIDES];
 	int size_override_count;
 	
 	// Debug/diagnostic tracking
@@ -190,8 +249,8 @@ struct UI_Context {
 };
 
 // Frame management
-void UI_BeginFrame(UI_Context *ui, UI_Render_List *out_list, int w, int h);
-void UI_BeginFrame_WithTime(UI_Context *ui, UI_Render_List *out_list, int w, int h, float delta_time_ms);
+void UI_Begin_Frame(UI_Context *ui, UI_Render_List *out_list, int w, int h);
+void UI_Begin_Frame_With_Time(UI_Context *ui, UI_Render_List *out_list, int w, int h, float delta_time_ms);
 
 // Panel API
 typedef UI_Style UI_Panel_Style;
@@ -267,6 +326,3 @@ void UI_Update_Interaction(UI_Context *ui);
 
 // Debug overlay
 void UI_Debug_Mouse_Overlay(UI_Context *ui);
-
-// Demo
-void UI_PanelDemo(UI_Context *ui);

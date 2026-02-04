@@ -1,4 +1,24 @@
-// app_ui.cpp
+// app_ui.cpp - Demo UI showing resizable 3-column layout
+//
+// LAYOUT STRUCTURE:
+// Root (full-screen, column direction)
+//   └─ Main (row direction, flex-grow)
+//        ├─ Left Sidebar (240px default, resizable, buttons/settings)
+//        ├─ Left Divider (vertical resize handle)
+//        ├─ Middle Content (flex-grow, column direction)
+//        │    ├─ Top Section (flex-grow)
+//        │    ├─ Middle Divider (horizontal resize handle)
+//        │    └─ Bottom Section (flex-grow)
+//        ├─ Right Divider (vertical resize handle)
+//        └─ Right Sidebar (320px default, resizable, properties)
+//   └─ Debug Overlay (mouse/input state display)
+//
+// This demonstrates:
+// - Helper functions (UI_BeginPanel, UI_Panel_Resizable, UI_Divider)
+// - Resizable dividers with persistent sizing
+// - Nested layouts (row within column)
+// - Buttons and labels
+//
 #include "app_ui.h"
 
 // Forward declarations

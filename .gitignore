@@ -1,6 +1,5 @@
 # Build output + archives
 /src/build/
-/src/backups/
 /src/build/archive/
 /src/build/*.exe
 /src/build/*.obj
@@ -28,4 +27,3 @@
 *.idb
 *.iobj
 *.ipdb
-*.md

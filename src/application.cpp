@@ -1,4 +1,19 @@
-//application.cpp
+// application.cpp - Direct2D application entry point
+//
+// UNITY BUILD: Includes ui.cpp and app_ui.cpp as single translation unit for fast compilation
+//
+// ARCHITECTURE:
+// - Continuous rendering loop at 120 FPS with precise frame pacing
+// - Full mouse and keyboard input forwarded to UI system
+// - Direct2D for hardware-accelerated 2D rendering
+// - DirectWrite for text rendering with UTF-8 support
+// - Text format caching for performance (16 font sizes max)
+//
+// FRAME LOOP:
+// 1. Process Windows messages (non-blocking)
+// 2. Render UI (build → layout → interaction → emit → draw)
+// 3. Wait for target frame time (busy-wait for precision)
+//
 #include <windows.h>
 #include <windowsx.h>
 #include <d2d1.h>
@@ -8,7 +23,7 @@
 #include "ui.cpp"
 #include "app_ui.h"
 
-bool is_running;
+bool g_is_running;
 bool g_is_resizing = false;
 
 // Cursor management
@@ -27,14 +42,14 @@ IDWriteTextFormat *p_text_format_default;
 
 // Text format cache (for performance)
 struct Text_Format_Cache {
-	IDWriteTextFormat *formats[16];
-	int sizes[16];
+	IDWriteTextFormat *formats[APP_MAX_TEXT_FORMATS];
+	int sizes[APP_MAX_TEXT_FORMATS];
 	int count;
 };
 Text_Format_Cache g_text_format_cache;
 
 // Global UI context (for window message handler access)
-UI_Context g_ui_context = {};
+UI_Context g_ui_context;
 
 // Frame timing system
 struct Frame_Timer {
@@ -49,7 +64,7 @@ struct Frame_Timer {
 	int frame_count_for_fps;
 };
 
-Frame_Timer g_frame_timer = {};
+Frame_Timer g_frame_timer;
 
 
 // .............................................................................................
@@ -64,7 +79,7 @@ Get_Text_Format(int font_size)
 	}
 	
 	// Create new format if not cached
-	if (g_text_format_cache.count < 16) {
+	if (g_text_format_cache.count < APP_MAX_TEXT_FORMATS) {
 		IDWriteTextFormat *fmt;
 		HRESULT hr = p_dwrite_factory->CreateTextFormat(
 			L"Segoe UI",
@@ -94,7 +109,8 @@ UI_RectI
 App_Measure_Text(const char *text, int font_size)
 {
 	if (!text || !p_dwrite_factory) {
-		return UI_RectI{ 0, 0, 0, 0 };
+		UI_RectI empty = {0, 0, 0, 0};
+		return empty;
 	}
 	
 	// Convert UTF-8 to UTF-16
@@ -116,7 +132,8 @@ App_Measure_Text(const char *text, int font_size)
 	);
 	
 	if (FAILED(hr)) {
-		return UI_RectI{ 0, 0, 0, 20 }; // Fallback height
+		UI_RectI fallback = {0, 0, 0, 20};
+		return fallback;
 	}
 	
 	// Get metrics
@@ -124,11 +141,12 @@ App_Measure_Text(const char *text, int font_size)
 	layout->GetMetrics(&metrics);
 	layout->Release();
 	
-	return UI_RectI{ 
-		0, 0, 
-		(int)(metrics.width + 0.5f), 
-		(int)(metrics.height + 0.5f) 
-	};
+	UI_RectI result;
+	result.x = 0;
+	result.y = 0;
+	result.w = (int)(metrics.width + 0.5f);
+	result.h = (int)(metrics.height + 0.5f);
+	return result;
 }
 
 
@@ -288,8 +306,9 @@ Render(HWND window)
 
     // Use global context
     g_ui_context.measure_text = App_Measure_Text;
-    UI_Render_List list = {};
-    UI_BeginFrame_WithTime(&g_ui_context, &list, w, h, delta_time_ms);
+    UI_Render_List list;
+    memset(&list, 0, sizeof(UI_Render_List));
+    UI_Begin_Frame_With_Time(&g_ui_context, &list, w, h, delta_time_ms);
     
     // Update FPS for debug display
     g_ui_context.current_fps = g_frame_timer.actual_fps;
@@ -299,7 +318,7 @@ Render(HWND window)
     
     // Layout (calculates panel rects)
     if (g_ui_context.state.panel_count > 0) {
-        UI_LayoutPanelTree(&g_ui_context.state, 0);
+        UI_Layout_Panel_Tree(&g_ui_context.state, 0);
     }
     
     // Update interaction (after layout, before render)
@@ -356,7 +375,7 @@ Render(HWND window)
     
     // Render
     if (g_ui_context.state.panel_count > 0) {
-        UI_EmitPanels(&g_ui_context.state, 0);
+        UI_Emit_Panels(&g_ui_context.state, 0);
     }
 
     Render_UI(&list);
@@ -543,7 +562,8 @@ MainWindowCallback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 int WINAPI
 WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR command_line, int show_code)
 {
-	WNDCLASSW window_class = {};
+	WNDCLASSW window_class;
+	memset(&window_class, 0, sizeof(WNDCLASSW));
 	window_class.style = CS_HREDRAW|CS_VREDRAW;
 	window_class.lpfnWndProc = MainWindowCallback;
 	window_class.cbClsExtra = 0;
@@ -564,16 +584,22 @@ WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR command_line, int
 										window_rect.bottom - window_rect.top,
 										0, 0, instance, 0);
 
-		if (window)
+		if (!window)
 		{
-			is_running = true;
+			MessageBoxA(NULL, "Failed to create window", "Error", MB_OK | MB_ICONERROR);
+			return 1;
+		}
+		
+		g_is_running = true;
 
 			if (!p_d2d_factory)
 			{
 				HRESULT result = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &p_d2d_factory);
 				if (result != S_OK)
 				{
+					MessageBoxA(NULL, "Failed to create Direct2D factory", "Error", MB_OK | MB_ICONERROR);
 					PostQuitMessage(1);
+					return 1;
 				}
 			}
 
@@ -589,7 +615,9 @@ WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR command_line, int
 		}
 		else
 		{
+			MessageBoxA(NULL, "Failed to create Direct2D render target", "Error", MB_OK | MB_ICONERROR);
 			PostQuitMessage(1);
+			return 1;
 		}
 		
 		// Initialize DirectWrite
@@ -600,8 +628,9 @@ WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR command_line, int
 		);
 		
 		if (FAILED(dwrite_result)) {
-			MessageBoxA(NULL, "Failed to initialize DirectWrite", "Error", MB_OK);
+			MessageBoxA(NULL, "Failed to initialize DirectWrite", "Error", MB_OK | MB_ICONERROR);
 			PostQuitMessage(1);
+			return 1;
 		}
 		else {
 			// Create default text format
@@ -617,8 +646,9 @@ WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR command_line, int
 			);
 			
 			if (FAILED(dwrite_result)) {
-				MessageBoxA(NULL, "Failed to create text format", "Error", MB_OK);
+				MessageBoxA(NULL, "Failed to create text format", "Error", MB_OK | MB_ICONERROR);
 				PostQuitMessage(1);
+				return 1;
 			}
 			else {
 				p_text_format_default->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
@@ -630,7 +660,7 @@ WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR command_line, int
 	}
 	
 	// Initialize UI context
-	g_ui_context = {};  // Zero-initialize everything
+	memset(&g_ui_context, 0, sizeof(UI_Context));
 	g_ui_context.frame_number = 0;
 	g_ui_context.delta_time_ms = 0.0f;
 	g_ui_context.last_button_clicked[0] = 0;  // Empty string
@@ -659,14 +689,14 @@ WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR command_line, int
 			UpdateWindow(window);
 
 		MSG message;
-		while (is_running)
+		while (g_is_running)
 		{
 			// Process all pending messages (non-blocking)
 			while (PeekMessage(&message, 0, 0, 0, PM_REMOVE))
 			{
 				if(message.message == WM_QUIT)
 				{
-					is_running = false;
+					g_is_running = false;
 					break;
 				}
 
@@ -679,7 +709,6 @@ WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR command_line, int
 			
 			// Wait for target frame time (precise pacing)
 			Wait_For_Target_Frame_Time();
-		}
 		}
 	}
 	
