@@ -1,5 +1,6 @@
 // ui.cpp
 #include "ui.h"
+#include <string.h>
 
 
 // internal per-frame pointer (not visible outside UI)
@@ -105,7 +106,7 @@ UI_NewPanel(UI_State *s, UI_Id id)
 
 	int idx = s->panel_count++;
 	UI_Panel *p = &s->panels[idx];
-	*p = UI_Panel{};
+	memset(p, 0, sizeof(UI_Panel));
 
 	p->id = id;
 	p->parent = -1;
@@ -114,8 +115,8 @@ UI_NewPanel(UI_State *s, UI_Id id)
 	p->next_sibling = -1;
 
 	p->style.color = 0xFF222222;
-	p->style.min_w = 0;   p->style.max_w = INT32_MAX;
-	p->style.min_h = 0;   p->style.max_h = INT32_MAX;
+	p->style.min_w = 200; p->style.max_w = INT32_MAX;
+	p->style.min_h = 200; p->style.max_h = INT32_MAX;
 	p->style.pref_w = -1; p->style.pref_h = -1;
 
 	p->style.flex_grow = 0.0f;
@@ -126,6 +127,9 @@ UI_NewPanel(UI_State *s, UI_Id id)
 	p->style.gap = 0;
 
 	p->style.pad_l = p->style.pad_t = p->style.pad_r = p->style.pad_b = 0;
+	
+	p->style.resizable = 0;
+	p->style.resize_hitbox_padding = 4;
 	
 	// Initialize label metadata
 	p->is_label = 0;
@@ -544,6 +548,134 @@ UI_Panel_Set_Grow(UI_Context *ui, float grow)
 
 // .............................................................................................
 void
+UI_Panel_Set_Padding_Uniform(UI_Context *ui, int padding)
+{
+	UI_Panel_Set_Padding(ui, padding, padding, padding, padding);
+}
+
+
+// .............................................................................................
+void
+UI_Panel_Set_Resizable(UI_Context *ui, int resizable, int hitbox_padding)
+{
+	if (ui->parent_stack_count == 0) return;
+	int idx = ui->parent_stack[ui->parent_stack_count - 1];
+	ui->state.panels[idx].style.resizable = resizable;
+	ui->state.panels[idx].style.resize_hitbox_padding = hitbox_padding;
+}
+
+
+// .............................................................................................
+void
+UI_BeginPanel(UI_Context *ui, const char *id, int direction, int w, int h, 
+              int padding, int gap, uint32_t color)
+{
+	UI_Begin_Panel(ui, id);
+	UI_Panel_Set_Direction(ui, (UI_Direction)direction);
+	
+	if (w >= 0 || h >= 0) {
+		UI_Panel_Set_Size(ui, w, h);
+	}
+	
+	if (padding > 0) {
+		UI_Panel_Set_Padding_Uniform(ui, padding);
+	}
+	
+	if (gap >= 0) {
+		UI_Panel_Set_Gap(ui, gap);
+	}
+	
+	if (color != 0) {
+		UI_Panel_Set_Color(ui, color);
+	}
+}
+
+
+// .............................................................................................
+void
+UI_Panel_Resizable(UI_Context *ui, const char *id, int direction, 
+                   int default_w, int default_h, int padding, int gap, uint32_t color)
+{
+	UI_Begin_Panel(ui, id);
+	UI_Panel_Set_Direction(ui, (UI_Direction)direction);
+	
+	// Check for size overrides (from user resizing via dividers)
+	UI_Id panel_id = UI_HashString(id);
+	int w = UI_Get_Size_Override_W(ui, panel_id);
+	int h = UI_Get_Size_Override_H(ui, panel_id);
+	
+	// Use overrides if they exist, otherwise use defaults
+	if (w < 0) w = default_w;
+	if (h < 0) h = default_h;
+	
+	// Handle flex-grow vs fixed-size (-2 means flex-grow)
+	int wants_flex_w = (default_w == -2);
+	int wants_flex_h = (default_h == -2);
+	
+	if (w == -2 || (w < 0 && wants_flex_w)) {
+		// Width wants flex-grow
+		if (h >= 0 && h != -2) {
+			// Fixed height, flex width
+			UI_Panel_Set_Size(ui, -1, h);
+		}
+		UI_Panel_Set_Grow(ui, 1.0f);
+	} else if (h == -2 || (h < 0 && wants_flex_h)) {
+		// Height wants flex-grow
+		if (w >= 0) {
+			// Fixed width, flex height
+			UI_Panel_Set_Size(ui, w, -1);
+		}
+		UI_Panel_Set_Grow(ui, 1.0f);
+	} else if (w >= 0 || h >= 0) {
+		// At least one dimension is fixed
+		UI_Panel_Set_Size(ui, w, h);
+	}
+	
+	if (padding > 0) {
+		UI_Panel_Set_Padding_Uniform(ui, padding);
+	}
+	
+	if (gap >= 0) {
+		UI_Panel_Set_Gap(ui, gap);
+	}
+	
+	if (color != 0) {
+		UI_Panel_Set_Color(ui, color);
+	}
+}
+
+
+// .............................................................................................
+void
+UI_Divider(UI_Context *ui, const char *id, int orientation)
+{
+	UI_Divider_Ex(ui, id, orientation, 0x33FFFFFF, 4);
+}
+
+
+// .............................................................................................
+void
+UI_Divider_Ex(UI_Context *ui, const char *id, int orientation, uint32_t color, int hitbox_padding)
+{
+	UI_Begin_Panel(ui, id);
+	
+	if (orientation == UI_DIVIDER_VERTICAL) {
+		// Vertical line (full height, 1px wide)
+		UI_Panel_Set_Size(ui, 1, -1);
+	} else {
+		// Horizontal line (full width, 1px tall)
+		UI_Panel_Set_Size(ui, -1, 1);
+	}
+	
+	UI_Panel_Set_Color(ui, color);
+	UI_Panel_Set_Resizable(ui, 1, hitbox_padding);
+	
+	UI_End_Panel(ui);
+}
+
+
+// .............................................................................................
+void
 UI_Label(UI_Context *ui, const char *text, uint32_t color)
 {
 	if (!text || !ui->measure_text) return;
@@ -590,10 +722,7 @@ UI_Input_Init(UI_Input *input)
 void
 UI_Input_NewFrame(UI_Context *ui)
 {
-	// Copy current state to previous
-	ui->input_prev = ui->input;
-	
-	// Calculate mouse delta
+	// Calculate mouse delta (input_prev set by UI_Input_EndFrame from last frame)
 	ui->input.mouse_dx = ui->input.mouse_x - ui->input_prev.mouse_x;
 	ui->input.mouse_dy = ui->input.mouse_y - ui->input_prev.mouse_y;
 	
@@ -616,6 +745,15 @@ UI_Input_NewFrame(UI_Context *ui)
 	ui->input.ctrl = ui->input.key_down[0x11];   // VK_CONTROL
 	ui->input.shift = ui->input.key_down[0x10];  // VK_SHIFT
 	ui->input.alt = ui->input.key_down[0x12];    // VK_MENU (Alt)
+}
+
+
+// .............................................................................................
+void
+UI_Input_EndFrame(UI_Context *ui)
+{
+	// Copy current state to previous for next frame's edge detection
+	ui->input_prev = ui->input;
 }
 
 
@@ -811,19 +949,276 @@ UI_Clear_Active_Widget(UI_Context *ui)
 
 
 // .............................................................................................
-static void
-UI_Update_Panel_Interaction(UI_Context *ui, UI_State *s, int panel_idx)
+void
+UI_Set_Size_Override(UI_Context *ui, UI_Id panel_id, int pref_w, int pref_h)
+{
+	// Check if override already exists
+	for (int i = 0; i < ui->size_override_count; i++) {
+		if (ui->size_overrides[i].panel_id == panel_id) {
+			// Update existing override
+			if (pref_w >= 0) ui->size_overrides[i].pref_w = pref_w;
+			if (pref_h >= 0) ui->size_overrides[i].pref_h = pref_h;
+			return;
+		}
+	}
+	
+	// Add new override
+	if (ui->size_override_count < 32) {
+		ui->size_overrides[ui->size_override_count].panel_id = panel_id;
+		ui->size_overrides[ui->size_override_count].pref_w = pref_w;
+		ui->size_overrides[ui->size_override_count].pref_h = pref_h;
+		ui->size_override_count++;
+	}
+}
+
+
+// .............................................................................................
+int
+UI_Get_Size_Override_W(UI_Context *ui, UI_Id panel_id)
+{
+	for (int i = 0; i < ui->size_override_count; i++) {
+		if (ui->size_overrides[i].panel_id == panel_id) {
+			return ui->size_overrides[i].pref_w;
+		}
+	}
+	return -1;  // No override found
+}
+
+
+// .............................................................................................
+int
+UI_Get_Size_Override_H(UI_Context *ui, UI_Id panel_id)
+{
+	for (int i = 0; i < ui->size_override_count; i++) {
+		if (ui->size_overrides[i].panel_id == panel_id) {
+			return ui->size_overrides[i].pref_h;
+		}
+	}
+	return -1;  // No override found
+}
+
+
+// .............................................................................................
+static int
+UI_Find_Panel_By_Id(UI_State *s, UI_Id id)
+{
+	for (int i = 0; i < s->panel_count; i++) {
+		if (s->panels[i].id == id) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+
+// .............................................................................................
+static int
+UI_Get_Resize_Direction(UI_State *s, int panel_idx)
 {
 	UI_Panel *p = &s->panels[panel_idx];
 	
-	// Check if mouse is over this panel (skip labels - they're non-interactive)
-	if (!p->is_label && UI_Is_Hovered(ui, p->rect)) {
-		UI_Set_Hot_Widget(ui, p->id);
+	// If no parent, cannot resize
+	if (p->parent < 0) return -1;
+	
+	UI_Panel *parent = &s->panels[p->parent];
+	
+	// Resize direction is perpendicular to parent's layout direction
+	// If parent is ROW (horizontal), dividers resize horizontally (0)
+	// If parent is COLUMN (vertical), dividers resize vertically (1)
+	return parent->style.direction;
+}
+
+
+// .............................................................................................
+static UI_RectI
+UI_Get_Expanded_Rect(UI_RectI rect, int padding)
+{
+	return UI_RectI{
+		rect.x - padding,
+		rect.y - padding,
+		rect.w + padding * 2,
+		rect.h + padding * 2
+	};
+}
+
+
+// .............................................................................................
+static int
+UI_Find_Adjacent_Panel(UI_State *s, int divider_idx)
+{
+	UI_Panel *divider = &s->panels[divider_idx];
+	
+	// Find the panel immediately before this divider in parent's child list
+	if (divider->parent < 0) return -1;
+	
+	UI_Panel *parent = &s->panels[divider->parent];
+	int prev_idx = -1;
+	
+	for (int c = parent->first_child; c != -1; c = s->panels[c].next_sibling) {
+		if (c == divider_idx) {
+			return prev_idx;  // Return previous sibling
+		}
+		prev_idx = c;
 	}
 	
-	// Recurse into children (they take priority)
+	return -1;
+}
+
+
+// .............................................................................................
+static int
+UI_Find_Next_Panel(UI_State *s, int divider_idx)
+{
+	UI_Panel *divider = &s->panels[divider_idx];
+	
+	// Return the panel immediately AFTER this divider in sibling list
+	return divider->next_sibling;
+}
+
+
+// .............................................................................................
+static void
+UI_Update_Divider_Resize(UI_Context *ui)
+{
+	if (ui->interaction.dragging_divider == 0) return;
+	
+	// Look up both panels by ID each frame (indices are not stable in immediate-mode)
+	int left_idx = -1, right_idx = -1;
+	
+	if (ui->interaction.resize_target_left_id != 0) {
+		left_idx = UI_Find_Panel_By_Id(&ui->state, ui->interaction.resize_target_left_id);
+	}
+	if (ui->interaction.resize_target_right_id != 0) {
+		right_idx = UI_Find_Panel_By_Id(&ui->state, ui->interaction.resize_target_right_id);
+	}
+	
+	// Need at least one panel to resize
+	if (left_idx < 0 && right_idx < 0) return;
+	
+	int divider_idx = UI_Find_Panel_By_Id(&ui->state, ui->interaction.dragging_divider);
+	if (divider_idx < 0) return;
+	
+	// Get resize direction (0=horizontal, 1=vertical)
+	int resize_dir = UI_Get_Resize_Direction(&ui->state, divider_idx);
+	if (resize_dir < 0) return;
+	
+	// Calculate delta from drag start
+	int current_pos = (resize_dir == 0) ? ui->input.mouse_x : ui->input.mouse_y;
+	int delta = current_pos - ui->interaction.drag_start_pos;
+	
+	// Calculate new sizes (zero-sum: left grows/shrinks by +delta, right by -delta)
+	int new_left_size = ui->interaction.drag_start_size_left + delta;
+	int new_right_size = ui->interaction.drag_start_size_right - delta;
+	
+	// Apply left panel constraints and recalculate delta if needed
+	if (left_idx >= 0) {
+		UI_Panel *left = &ui->state.panels[left_idx];
+		int min = (resize_dir == 0) ? left->style.min_w : left->style.min_h;
+		int max = (resize_dir == 0) ? left->style.max_w : left->style.max_h;
+		
+		if (new_left_size < min) {
+			// Left panel hit minimum - recalculate delta
+			delta = min - ui->interaction.drag_start_size_left;
+			new_left_size = min;
+			new_right_size = ui->interaction.drag_start_size_right - delta;
+		} else if (new_left_size > max) {
+			// Left panel hit maximum - recalculate delta
+			delta = max - ui->interaction.drag_start_size_left;
+			new_left_size = max;
+			new_right_size = ui->interaction.drag_start_size_right - delta;
+		}
+	}
+	
+	// Apply right panel constraints and recalculate delta if needed
+	if (right_idx >= 0) {
+		UI_Panel *right = &ui->state.panels[right_idx];
+		int min = (resize_dir == 0) ? right->style.min_w : right->style.min_h;
+		int max = (resize_dir == 0) ? right->style.max_w : right->style.max_h;
+		
+		if (new_right_size < min) {
+			// Right panel hit minimum - recalculate delta from right's perspective
+			delta = ui->interaction.drag_start_size_right - min;
+			new_right_size = min;
+			new_left_size = ui->interaction.drag_start_size_left + delta;
+		} else if (new_right_size > max) {
+			// Right panel hit maximum - recalculate delta from right's perspective
+			delta = ui->interaction.drag_start_size_right - max;
+			new_right_size = max;
+			new_left_size = ui->interaction.drag_start_size_left + delta;
+		}
+	}
+	
+	// Apply final sizes to both panels
+	if (resize_dir == 0) {
+		// Horizontal resize
+		if (left_idx >= 0) {
+			UI_Panel *left = &ui->state.panels[left_idx];
+			UI_Set_Size_Override(ui, ui->interaction.resize_target_left_id, new_left_size, -1);
+			left->style.pref_w = new_left_size;
+			left->style.flex_grow = 0.0f;  // Convert from flex to fixed
+		}
+		if (right_idx >= 0) {
+			UI_Panel *right = &ui->state.panels[right_idx];
+			UI_Set_Size_Override(ui, ui->interaction.resize_target_right_id, new_right_size, -1);
+			right->style.pref_w = new_right_size;
+			right->style.flex_grow = 0.0f;  // Convert from flex to fixed
+		}
+	} else {
+		// Vertical resize
+		if (left_idx >= 0) {
+			UI_Panel *left = &ui->state.panels[left_idx];
+			UI_Set_Size_Override(ui, ui->interaction.resize_target_left_id, -1, new_left_size);
+			left->style.pref_h = new_left_size;
+			left->style.flex_grow = 0.0f;  // Convert from flex to fixed
+		}
+		if (right_idx >= 0) {
+			UI_Panel *right = &ui->state.panels[right_idx];
+			UI_Set_Size_Override(ui, ui->interaction.resize_target_right_id, -1, new_right_size);
+			right->style.pref_h = new_right_size;
+			right->style.flex_grow = 0.0f;  // Convert from flex to fixed
+		}
+	}
+}
+
+
+// .............................................................................................
+static void
+UI_Update_Panel_Interaction_NonResizable(UI_Context *ui, UI_State *s, int panel_idx)
+{
+	UI_Panel *p = &s->panels[panel_idx];
+	
+	// Check non-resizable panels only (skip labels and resizable dividers)
+	if (!p->is_label && !p->style.resizable) {
+		if (UI_Is_Hovered(ui, p->rect)) {
+			UI_Set_Hot_Widget(ui, p->id);
+		}
+	}
+	
+	// Recurse into children
 	for (int c = p->first_child; c != -1; c = s->panels[c].next_sibling) {
-		UI_Update_Panel_Interaction(ui, s, c);
+		UI_Update_Panel_Interaction_NonResizable(ui, s, c);
+	}
+}
+
+
+// .............................................................................................
+static void
+UI_Update_Panel_Interaction_Resizable(UI_Context *ui, UI_State *s, int panel_idx)
+{
+	UI_Panel *p = &s->panels[panel_idx];
+	
+	// Check resizable panels with expanded hitbox (highest priority)
+	if (!p->is_label && p->style.resizable) {
+		UI_RectI check_rect = UI_Get_Expanded_Rect(p->rect, p->style.resize_hitbox_padding);
+		
+		if (UI_Is_Hovered(ui, check_rect)) {
+			UI_Set_Hot_Widget(ui, p->id);
+		}
+	}
+	
+	// Recurse into children
+	for (int c = p->first_child; c != -1; c = s->panels[c].next_sibling) {
+		UI_Update_Panel_Interaction_Resizable(ui, s, c);
 	}
 }
 
@@ -832,23 +1227,89 @@ UI_Update_Panel_Interaction(UI_Context *ui, UI_State *s, int panel_idx)
 void
 UI_Update_Interaction(UI_Context *ui)
 {
+	// Update divider resize if dragging
+	UI_Update_Divider_Resize(ui);
+	
 	// Clear hot widget
 	ui->interaction.hot_widget = 0;
 	
-	// Walk panel tree and update hot widget
+	// Two-pass system: check all non-resizable panels first, then all resizable panels
+	// This ensures resizable dividers always have highest priority when their expanded hitbox is hovered
 	if (ui->state.panel_count > 0) {
-		UI_Update_Panel_Interaction(ui, &ui->state, 0);
+		// PASS 1: Check all non-resizable panels (buttons, sidebars, content areas)
+		UI_Update_Panel_Interaction_NonResizable(ui, &ui->state, 0);
+		
+		// PASS 2: Check all resizable panels with expanded hitbox (dividers win conflicts)
+		UI_Update_Panel_Interaction_Resizable(ui, &ui->state, 0);
 	}
 	
-	// Handle active widget transitions
+	// Handle drag start
 	if (UI_Is_Mouse_Pressed(ui, UI_MOUSE_LEFT)) {
 		if (ui->interaction.hot_widget != 0) {
-			UI_Set_Active_Widget(ui, ui->interaction.hot_widget);
+			// Check if hot widget is a resizable divider
+			int hot_idx = UI_Find_Panel_By_Id(&ui->state, ui->interaction.hot_widget);
+			if (hot_idx >= 0 && ui->state.panels[hot_idx].style.resizable) {
+				// Start dragging divider
+				ui->interaction.dragging_divider = ui->interaction.hot_widget;
+				
+				// Find BOTH adjacent panels (left and right of divider)
+				int left_idx = UI_Find_Adjacent_Panel(&ui->state, hot_idx);
+				int right_idx = UI_Find_Next_Panel(&ui->state, hot_idx);
+				
+				// Get resize direction (0=horizontal, 1=vertical)
+				int resize_dir = UI_Get_Resize_Direction(&ui->state, hot_idx);
+				
+				// Store drag start mouse position
+				ui->interaction.drag_start_pos = (resize_dir == 0) 
+					? ui->input.mouse_x 
+					: ui->input.mouse_y;
+				
+				// Store left panel info (if exists)
+				if (left_idx >= 0) {
+					UI_Panel *left = &ui->state.panels[left_idx];
+					ui->interaction.resize_target_left_id = left->id;
+					// Use actual computed size (not pref_w/h which might be -1 for flex)
+					ui->interaction.drag_start_size_left = (resize_dir == 0) 
+						? left->rect.w 
+						: left->rect.h;
+				} else {
+					ui->interaction.resize_target_left_id = 0;
+					ui->interaction.drag_start_size_left = 0;
+				}
+				
+				// Store right panel info (if exists)
+				if (right_idx >= 0) {
+					UI_Panel *right = &ui->state.panels[right_idx];
+					ui->interaction.resize_target_right_id = right->id;
+					// Use actual computed size (not pref_w/h which might be -1 for flex)
+					ui->interaction.drag_start_size_right = (resize_dir == 0) 
+						? right->rect.w 
+						: right->rect.h;
+				} else {
+					ui->interaction.resize_target_right_id = 0;
+					ui->interaction.drag_start_size_right = 0;
+				}
+			} else {
+				// Normal widget activation
+				UI_Set_Active_Widget(ui, ui->interaction.hot_widget);
+			}
 		}
 	}
 	
+	// Handle drag end
 	if (UI_Is_Mouse_Released(ui, UI_MOUSE_LEFT)) {
-		UI_Clear_Active_Widget(ui);
+		if (ui->interaction.dragging_divider != 0) {
+			// Stop dragging
+			ui->interaction.dragging_divider = 0;
+			ui->interaction.resize_target_left_id = 0;
+			ui->interaction.resize_target_right_id = 0;
+			ui->interaction.drag_start_size_left = 0;
+			ui->interaction.drag_start_size_right = 0;
+			ui->interaction.drag_start_pos = 0;
+		} else {
+			// Normal widget deactivation
+			UI_Clear_Active_Widget(ui);
+		}
 	}
 }
 
@@ -915,9 +1376,10 @@ UI_Debug_Mouse_Overlay(UI_Context *ui)
 	// Build line 1 - input & timing state
 	char line1[512];
 	snprintf(line1, sizeof(line1), 
-	         "Frame:%d dt:%.1fms | Mouse:(%d,%d) | Down L:%d R:%d M:%d | Press L:%d R:%d M:%d | Release L:%d R:%d M:%d | Char:'%c'",
+	         "Frame:%d %.2fms | %d FPS | Mouse:(%d,%d) | Down L:%d R:%d M:%d | Press L:%d R:%d M:%d | Release L:%d R:%d M:%d | Char:'%c'",
 	         ui->frame_number,
 	         ui->delta_time_ms,
+	         ui->current_fps,
 	         ui->input.mouse_x, ui->input.mouse_y,
 	         ui->input.mouse_down[UI_MOUSE_LEFT],
 	         ui->input.mouse_down[UI_MOUSE_RIGHT],
@@ -934,10 +1396,15 @@ UI_Debug_Mouse_Overlay(UI_Context *ui)
 	// Build line 2 - widget interaction state
 	char line2[512];
 	snprintf(line2, sizeof(line2), 
-	         "Hot:%d Active:%d ActivePrev:%d | LastButton:\"%s\"",
+	         "Hot:%d Active:%d | Drag:%d | L:%d(sz:%d) R:%d(sz:%d) Pos:%d | Last:\"%s\"",
 	         ui->interaction.hot_widget,
 	         ui->interaction.active_widget,
-	         ui->interaction.active_widget_prev,
+	         ui->interaction.dragging_divider,
+	         ui->interaction.resize_target_left_id,
+	         ui->interaction.drag_start_size_left,
+	         ui->interaction.resize_target_right_id,
+	         ui->interaction.drag_start_size_right,
+	         ui->interaction.drag_start_pos,
 	         ui->last_button_clicked[0] ? ui->last_button_clicked : "None"
 	);
 	
@@ -962,113 +1429,6 @@ UI_Debug_Mouse_Overlay(UI_Context *ui)
 }
 
 
-// .............................................................................................
-void UI_PanelDemo(UI_Context *ui)
-{
-	UI_Begin_Panel(ui, "root");
-	UI_Panel_Set_Color(ui, 0xFF111115);
-	UI_Panel_Set_Padding(ui, 8, 8, 8, 8);
-	UI_Panel_Set_Direction(ui, UI_DIRECTION_COLUMN);
-	UI_Panel_Set_Gap(ui, 0);
-	{
-		// Main content area (row layout with sidebar + middle + right)
-		UI_Begin_Panel(ui, "main_content");
-		UI_Panel_Set_Grow(ui, 1.0f);
-		UI_Panel_Set_Direction(ui, UI_DIRECTION_ROW);
-		UI_Panel_Set_Gap(ui, 0);
-		{
-			// Left sidebar with buttons
-			UI_Begin_Panel(ui, "left");
-			UI_Panel_Set_Size(ui, 240, -1);
-			UI_Panel_Set_Color(ui, 0xFF22222A);
-			UI_Panel_Set_Direction(ui, UI_DIRECTION_COLUMN);
-			UI_Panel_Set_Gap(ui, 8);
-			UI_Panel_Set_Padding(ui, 12, 12, 12, 12);
-				UI_Label(ui, "Actions", 0xFFFFFFFF);
-				
-				if (UI_Button(ui, "Save")) {
-					// Button was clicked!
-				}
-				
-				if (UI_Button(ui, "Load")) {
-					// Load button clicked
-				}
-				
-				if (UI_Button(ui, "Reset")) {
-					// Reset button clicked
-				}
-				
-				UI_Label(ui, "", 0xFF000000);  // Spacer
-				UI_Label(ui, "Settings", 0xFFFFFFFF);
-				UI_Label(ui, "Graphics", 0xFFAAAAAA);
-				UI_Label(ui, "Audio", 0xFFAAAAAA);
-			UI_End_Panel(ui);
-			
-			// Left divider
-			UI_Begin_Panel(ui, "left_divider");
-			UI_Panel_Set_Size(ui, 1, -1);
-			UI_Panel_Set_Color(ui, 0x33FFFFFF);
-			UI_End_Panel(ui);
-			
-			// Middle content area
-			UI_Begin_Panel(ui, "mid");
-			UI_Panel_Set_Grow(ui, 1.0f);
-			UI_Panel_Set_Color(ui, 0xFF1A1A20);
-			UI_Panel_Set_Direction(ui, UI_DIRECTION_COLUMN);
-			UI_Panel_Set_Gap(ui, 8);
-			UI_Panel_Set_Padding(ui, 8, 8, 8, 8);
-				UI_Label(ui, "Main Content Area", 0xFFFFFFFF);
-				
-				UI_Begin_Panel(ui, "mid_top");
-				UI_Panel_Set_Grow(ui, 1.0f);
-				UI_Panel_Set_Color(ui, 0x44FFFFFF);
-				UI_Panel_Set_Padding(ui, 12, 12, 12, 12);
-				UI_Panel_Set_Direction(ui, UI_DIRECTION_COLUMN);
-				UI_Panel_Set_Gap(ui, 8);
-					UI_Label(ui, "Top Section", 0xFFFFFFFF);
-					
-					if (UI_Button(ui, "Click Me!")) {
-						// Centered button clicked
-					}
-					
-					UI_Label(ui, "Hover over buttons to see effects", 0xFFAAAAAA);
-				UI_End_Panel(ui);
-				
-				UI_Begin_Panel(ui, "mid_bottom");
-				UI_Panel_Set_Grow(ui, 1.0f);
-				UI_Panel_Set_Color(ui, 0x44FFFFFF);
-				UI_Panel_Set_Padding(ui, 12, 12, 12, 12);
-				UI_Panel_Set_Direction(ui, UI_DIRECTION_COLUMN);
-				UI_Panel_Set_Gap(ui, 4);
-					UI_Label(ui, "Bottom Section", 0xFFFFFFFF);
-					UI_Label(ui, "Press mouse buttons and watch the debug overlay", 0xFFAAAAAA);
-				UI_End_Panel(ui);
-			UI_End_Panel(ui);
-			
-			// Right divider
-			UI_Begin_Panel(ui, "right_divider");
-			UI_Panel_Set_Size(ui, 1, -1);
-			UI_Panel_Set_Color(ui, 0x33FFFFFF);
-			UI_End_Panel(ui);
-			
-			// Right sidebar
-			UI_Begin_Panel(ui, "right");
-			UI_Panel_Set_Size(ui, 320, -1);
-			UI_Panel_Set_Color(ui, 0xFF22222A);
-			UI_Panel_Set_Direction(ui, UI_DIRECTION_COLUMN);
-			UI_Panel_Set_Gap(ui, 4);
-			UI_Panel_Set_Padding(ui, 12, 12, 12, 12);
-				UI_Label(ui, "Properties", 0xFFFFFFFF);
-				UI_Label(ui, "Width: 1920", 0xFFAAAAAA);
-				UI_Label(ui, "Height: 1080", 0xFFAAAAAA);
-				UI_Label(ui, "FPS: 60", 0xFFAAAAAA);
-			UI_End_Panel(ui);
-		}
-		UI_End_Panel(ui);
-		
-		// Debug overlay at bottom
-		UI_Debug_Mouse_Overlay(ui);
-	}
-	UI_End_Panel(ui);
-}
+// Include user UI for unity build
+#include "app_ui.cpp"
 

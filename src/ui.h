@@ -17,6 +17,11 @@ enum UI_Align {
 	UI_ALIGN_END = 2
 };
 
+enum UI_Divider_Orientation {
+	UI_DIVIDER_VERTICAL = 0,      // Vertical line (resizes horizontally)
+	UI_DIVIDER_HORIZONTAL = 1     // Horizontal line (resizes vertically)
+};
+
 // Mouse button enums
 enum UI_Mouse_Button {
 	UI_MOUSE_LEFT = 0,
@@ -78,6 +83,8 @@ struct UI_Style {
     int flex_basis;
     int direction; // 0=row, 1=column
     int gap;
+	int resizable;              // 0 = not resizable, 1 = resizable
+	int resize_hitbox_padding;  // Extra pixels around divider for hitbox
 };
 
 struct UI_Panel {
@@ -136,6 +143,19 @@ struct UI_Interaction {
 	UI_Id active_widget;
 	UI_Id active_widget_prev;
 	UI_Id focused_widget;
+	UI_Id dragging_divider;      // Panel ID being dragged (0 if not)
+	int drag_start_pos;           // Initial mouse x or y
+	int drag_start_size_left;     // Left panel's starting size
+	int drag_start_size_right;    // Right panel's starting size
+	UI_Id resize_target_left_id;  // Panel to left of divider (stable across frames)
+	UI_Id resize_target_right_id; // Panel to right of divider (stable across frames)
+};
+
+// Size override for persistent panel sizing across frame rebuilds
+struct UI_Size_Override {
+	UI_Id panel_id;
+	int pref_w;
+	int pref_h;
 };
 
 struct UI_Context {
@@ -158,9 +178,14 @@ struct UI_Context {
 	UI_Input input_prev;
 	UI_Interaction interaction;
 	
+	// Size overrides (persist across frame rebuilds)
+	UI_Size_Override size_overrides[32];
+	int size_override_count;
+	
 	// Debug/diagnostic tracking
 	int frame_number;
 	float delta_time_ms;
+	int current_fps;
 	char last_button_clicked[MAX_UI_TEXT_LENGTH];
 };
 
@@ -180,9 +205,21 @@ void UI_End_Panel(UI_Context *ui);
 void UI_Panel_Set_Color(UI_Context *ui, uint32_t color);
 void UI_Panel_Set_Size(UI_Context *ui, int width, int height);
 void UI_Panel_Set_Padding(UI_Context *ui, int l, int t, int r, int b);
+void UI_Panel_Set_Padding_Uniform(UI_Context *ui, int padding);
 void UI_Panel_Set_Direction(UI_Context *ui, UI_Direction dir);
 void UI_Panel_Set_Gap(UI_Context *ui, int gap);
 void UI_Panel_Set_Grow(UI_Context *ui, float grow);
+void UI_Panel_Set_Resizable(UI_Context *ui, int resizable, int hitbox_padding);
+
+// Compact panel creation helpers
+void UI_BeginPanel(UI_Context *ui, const char *id, int direction, int w, int h, 
+                   int padding, int gap, uint32_t color);
+void UI_Panel_Resizable(UI_Context *ui, const char *id, int direction, 
+                        int default_w, int default_h, int padding, int gap, uint32_t color);
+
+// Divider helpers
+void UI_Divider(UI_Context *ui, const char *id, int orientation);
+void UI_Divider_Ex(UI_Context *ui, const char *id, int orientation, uint32_t color, int hitbox_padding);
 
 // Widgets
 void UI_Label(UI_Context *ui, const char *text, uint32_t color);
@@ -191,6 +228,7 @@ int UI_Button(UI_Context *ui, const char *text);
 // Input system
 void UI_Input_Init(UI_Input *input);
 void UI_Input_NewFrame(UI_Context *ui);
+void UI_Input_EndFrame(UI_Context *ui);
 void UI_Input_ProcessMouseMove(UI_Context *ui, int x, int y);
 void UI_Input_ProcessMouseButton(UI_Context *ui, UI_Mouse_Button button, int down);
 void UI_Input_ProcessMouseWheel(UI_Context *ui, float delta);
@@ -218,6 +256,11 @@ int UI_Is_Widget_Active(UI_Context *ui, UI_Id id);
 void UI_Set_Hot_Widget(UI_Context *ui, UI_Id id);
 void UI_Set_Active_Widget(UI_Context *ui, UI_Id id);
 void UI_Clear_Active_Widget(UI_Context *ui);
+
+// Size override helpers (for persistent panel sizing)
+void UI_Set_Size_Override(UI_Context *ui, UI_Id panel_id, int pref_w, int pref_h);
+int UI_Get_Size_Override_W(UI_Context *ui, UI_Id panel_id);
+int UI_Get_Size_Override_H(UI_Context *ui, UI_Id panel_id);
 
 // Interaction update
 void UI_Update_Interaction(UI_Context *ui);

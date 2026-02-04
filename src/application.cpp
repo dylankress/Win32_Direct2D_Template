@@ -6,8 +6,16 @@
 #include <stdio.h>
 #include <stdint.h>
 #include "ui.cpp"
+#include "app_ui.h"
 
 bool is_running;
+bool g_is_resizing = false;
+
+// Cursor management
+HCURSOR g_cursor_arrow = NULL;
+HCURSOR g_cursor_size_we = NULL;  // Horizontal resize ↔
+HCURSOR g_cursor_size_ns = NULL;  // Vertical resize ↕
+HCURSOR g_current_cursor = NULL;
 
 ID2D1Factory *p_d2d_factory;
 ID2D1HwndRenderTarget *p_render_target;
@@ -27,6 +35,21 @@ Text_Format_Cache g_text_format_cache;
 
 // Global UI context (for window message handler access)
 UI_Context g_ui_context = {};
+
+// Frame timing system
+struct Frame_Timer {
+	LARGE_INTEGER frequency;
+	LARGE_INTEGER frame_start;
+	LARGE_INTEGER frame_end;
+	double target_frame_time_ms;
+	double actual_frame_time_ms;
+	int target_fps;
+	int actual_fps;
+	double fps_update_timer;
+	int frame_count_for_fps;
+};
+
+Frame_Timer g_frame_timer = {};
 
 
 // .............................................................................................
@@ -198,22 +221,63 @@ Render_UI_Text(UI_Render_List *render_list)
 
 // .............................................................................................
 void
+UI_Set_Cursor(HCURSOR cursor)
+{
+	if (cursor != g_current_cursor) {
+		SetCursor(cursor);
+		g_current_cursor = cursor;
+	}
+}
+
+
+// .............................................................................................
+void
+Wait_For_Target_Frame_Time()
+{
+	// Calculate elapsed time this frame
+	LARGE_INTEGER current_time;
+	QueryPerformanceCounter(&current_time);
+	
+	double elapsed_ms = (double)(current_time.QuadPart - g_frame_timer.frame_start.QuadPart) 
+	                    * 1000.0 / (double)g_frame_timer.frequency.QuadPart;
+	
+	// Busy-wait until we reach target frame time
+	while (elapsed_ms < g_frame_timer.target_frame_time_ms) {
+		QueryPerformanceCounter(&current_time);
+		elapsed_ms = (double)(current_time.QuadPart - g_frame_timer.frame_start.QuadPart) 
+		             * 1000.0 / (double)g_frame_timer.frequency.QuadPart;
+		
+		// Yield CPU if we're more than 1ms away
+		if (elapsed_ms < g_frame_timer.target_frame_time_ms - 1.0) {
+			Sleep(0);
+		}
+	}
+	
+	// Update frame timing
+	g_frame_timer.frame_end = current_time;
+	g_frame_timer.actual_frame_time_ms = elapsed_ms;
+	
+	// Update FPS counter (once per second)
+	g_frame_timer.frame_count_for_fps++;
+	g_frame_timer.fps_update_timer += elapsed_ms;
+	
+	if (g_frame_timer.fps_update_timer >= 1000.0) {
+		g_frame_timer.actual_fps = g_frame_timer.frame_count_for_fps;
+		g_frame_timer.frame_count_for_fps = 0;
+		g_frame_timer.fps_update_timer -= 1000.0;
+	}
+	
+	// Mark start of next frame
+	g_frame_timer.frame_start = current_time;
+}
+
+
+// .............................................................................................
+void
 Render(HWND window)
 {
-    static LARGE_INTEGER last_time = {0};
-    static LARGE_INTEGER frequency = {0};
-    
-    // Initialize performance counter on first call
-    if (frequency.QuadPart == 0) {
-        QueryPerformanceFrequency(&frequency);
-        QueryPerformanceCounter(&last_time);
-    }
-    
-    // Calculate delta time
-    LARGE_INTEGER current_time;
-    QueryPerformanceCounter(&current_time);
-    float delta_time_ms = (float)((current_time.QuadPart - last_time.QuadPart) * 1000.0 / frequency.QuadPart);
-    last_time = current_time;
+    // Use frame timer's actual frame time
+    float delta_time_ms = (float)g_frame_timer.actual_frame_time_ms;
     
     RECT cr; GetClientRect(window, &cr);
     int w = cr.right - cr.left;
@@ -227,8 +291,11 @@ Render(HWND window)
     UI_Render_List list = {};
     UI_BeginFrame_WithTime(&g_ui_context, &list, w, h, delta_time_ms);
     
+    // Update FPS for debug display
+    g_ui_context.current_fps = g_frame_timer.actual_fps;
+    
     // Build UI tree
-    UI_PanelDemo(&g_ui_context);
+    App_UI_Build(&g_ui_context);
     
     // Layout (calculates panel rects)
     if (g_ui_context.state.panel_count > 0) {
@@ -237,6 +304,55 @@ Render(HWND window)
     
     // Update interaction (after layout, before render)
     UI_Update_Interaction(&g_ui_context);
+    
+    // Cursor selection based on hot widget and drag state
+    if (g_ui_context.interaction.dragging_divider != 0) {
+        // During drag, keep resize cursor
+        int divider_idx = -1;
+        for (int i = 0; i < g_ui_context.state.panel_count; i++) {
+            if (g_ui_context.state.panels[i].id == g_ui_context.interaction.dragging_divider) {
+                divider_idx = i;
+                break;
+            }
+        }
+        
+        if (divider_idx >= 0) {
+            UI_Panel *divider = &g_ui_context.state.panels[divider_idx];
+            if (divider->parent >= 0) {
+                UI_Panel *parent = &g_ui_context.state.panels[divider->parent];
+                if (parent->style.direction == UI_DIRECTION_ROW) {
+                    UI_Set_Cursor(g_cursor_size_we);
+                } else {
+                    UI_Set_Cursor(g_cursor_size_ns);
+                }
+            }
+        }
+    } else if (g_ui_context.interaction.hot_widget != 0) {
+        // Check if hot widget is a resizable divider
+        int hot_idx = -1;
+        for (int i = 0; i < g_ui_context.state.panel_count; i++) {
+            if (g_ui_context.state.panels[i].id == g_ui_context.interaction.hot_widget) {
+                hot_idx = i;
+                break;
+            }
+        }
+        
+        if (hot_idx >= 0 && g_ui_context.state.panels[hot_idx].style.resizable) {
+            UI_Panel *hot_panel = &g_ui_context.state.panels[hot_idx];
+            if (hot_panel->parent >= 0) {
+                UI_Panel *parent = &g_ui_context.state.panels[hot_panel->parent];
+                if (parent->style.direction == UI_DIRECTION_ROW) {
+                    UI_Set_Cursor(g_cursor_size_we);
+                } else {
+                    UI_Set_Cursor(g_cursor_size_ns);
+                }
+            }
+        } else {
+            UI_Set_Cursor(g_cursor_arrow);
+        }
+    } else {
+        UI_Set_Cursor(g_cursor_arrow);
+    }
     
     // Render
     if (g_ui_context.state.panel_count > 0) {
@@ -247,6 +363,9 @@ Render(HWND window)
     Render_UI_Text(&list);
 
     p_render_target->EndDraw();
+    
+    // Copy input state for next frame's edge detection
+    UI_Input_EndFrame(&g_ui_context);
 }
 
 
@@ -283,52 +402,54 @@ MainWindowCallback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 		int x = GET_X_LPARAM(lparam);
 		int y = GET_Y_LPARAM(lparam);
 		UI_Input_ProcessMouseMove(&g_ui_context, x, y);
-		InvalidateRect(window, NULL, FALSE);
+	} break;
+
+	case WM_SETCURSOR:
+	{
+		// Only handle cursor in client area
+		if (LOWORD(lparam) == HTCLIENT) {
+			// We manage cursor ourselves in Render(), tell Windows to not override
+			return TRUE;
+		}
+		return DefWindowProcW(window, message, wparam, lparam);
 	} break;
 
 	case WM_LBUTTONDOWN:
 	{
 		UI_Input_ProcessMouseButton(&g_ui_context, UI_MOUSE_LEFT, 1);
 		SetCapture(window);
-		InvalidateRect(window, NULL, FALSE);
 	} break;
 
 	case WM_LBUTTONUP:
 	{
 		UI_Input_ProcessMouseButton(&g_ui_context, UI_MOUSE_LEFT, 0);
 		ReleaseCapture();
-		InvalidateRect(window, NULL, FALSE);
 	} break;
 
 	case WM_RBUTTONDOWN:
 	{
 		UI_Input_ProcessMouseButton(&g_ui_context, UI_MOUSE_RIGHT, 1);
-		InvalidateRect(window, NULL, FALSE);
 	} break;
 
 	case WM_RBUTTONUP:
 	{
 		UI_Input_ProcessMouseButton(&g_ui_context, UI_MOUSE_RIGHT, 0);
-		InvalidateRect(window, NULL, FALSE);
 	} break;
 
 	case WM_MBUTTONDOWN:
 	{
 		UI_Input_ProcessMouseButton(&g_ui_context, UI_MOUSE_MIDDLE, 1);
-		InvalidateRect(window, NULL, FALSE);
 	} break;
 
 	case WM_MBUTTONUP:
 	{
 		UI_Input_ProcessMouseButton(&g_ui_context, UI_MOUSE_MIDDLE, 0);
-		InvalidateRect(window, NULL, FALSE);
 	} break;
 
 	case WM_MOUSEWHEEL:
 	{
 		int delta = GET_WHEEL_DELTA_WPARAM(wparam);
 		UI_Input_ProcessMouseWheel(&g_ui_context, (float)delta / (float)WHEEL_DELTA);
-		InvalidateRect(window, NULL, FALSE);
 	} break;
 
 	case WM_KEYDOWN:
@@ -339,7 +460,6 @@ MainWindowCallback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 		if (!was_down) {
 			UI_Input_ProcessKey(&g_ui_context, vk, 1);
 		}
-		InvalidateRect(window, NULL, FALSE);
 	} break;
 
 	case WM_KEYUP:
@@ -347,7 +467,6 @@ MainWindowCallback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 	{
 		int vk = (int)wparam;
 		UI_Input_ProcessKey(&g_ui_context, vk, 0);
-		InvalidateRect(window, NULL, FALSE);
 	} break;
 
 	case WM_CHAR:
@@ -356,24 +475,39 @@ MainWindowCallback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 		if (c >= 32 && c < 127) {
 			UI_Input_ProcessChar(&g_ui_context, c);
 		}
-		InvalidateRect(window, NULL, FALSE);
 	} break;
 
 	case WM_PAINT:
 		{
 			PAINTSTRUCT paint_struct;
 			BeginPaint(window, &paint_struct);
-			Render(window);
+			
+			// Render during resize (Windows blocks main loop)
+			if (g_is_resizing) {
+				Render(window);
+			}
+			// Otherwise, continuous loop handles rendering
+			
 			EndPaint(window, &paint_struct);
 
 		} break;
 
-		case WM_ERASEBKGND:
-		{
-			return 1;
-		}
+	case WM_ERASEBKGND:
+	{
+		return 1;
+	}
+	
+	case WM_ENTERSIZEMOVE:
+	{
+		g_is_resizing = true;
+	} break;
+	
+	case WM_EXITSIZEMOVE:
+	{
+		g_is_resizing = false;
+	} break;
 
-		case WM_CLOSE:
+	case WM_CLOSE:
 		{
 			DestroyWindow(window);
 		} break;
@@ -504,25 +638,48 @@ WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR command_line, int
 	// Initialize input system
 	UI_Input_Init(&g_ui_context.input);
 	UI_Input_Init(&g_ui_context.input_prev);
+	
+	// Initialize cursor handles
+	g_cursor_arrow = LoadCursor(NULL, IDC_ARROW);
+	g_cursor_size_we = LoadCursor(NULL, IDC_SIZEWE);
+	g_cursor_size_ns = LoadCursor(NULL, IDC_SIZENS);
+	g_current_cursor = g_cursor_arrow;
+	SetCursor(g_cursor_arrow);  // Set initial cursor to prevent spinning wheel
+	
+	// Initialize frame timing system
+	QueryPerformanceFrequency(&g_frame_timer.frequency);
+	QueryPerformanceCounter(&g_frame_timer.frame_start);
+	g_frame_timer.target_fps = 120;
+	g_frame_timer.target_frame_time_ms = 1000.0 / 120.0;  // ~8.33ms
+	g_frame_timer.actual_fps = 120;
+	g_frame_timer.fps_update_timer = 0.0;
+	g_frame_timer.frame_count_for_fps = 0;
 
 	ShowWindow(window, SW_MAXIMIZE);
 			UpdateWindow(window);
 
-			MSG message;
-			while (is_running)
+		MSG message;
+		while (is_running)
+		{
+			// Process all pending messages (non-blocking)
+			while (PeekMessage(&message, 0, 0, 0, PM_REMOVE))
 			{
-				while (PeekMessage(&message, 0, 0, 0, PM_REMOVE))
+				if(message.message == WM_QUIT)
 				{
-					if(message.message == WM_QUIT)
-					{
-						is_running = false;
-						break;
-					}
-
-					TranslateMessage(&message);
-					DispatchMessageW(&message);
+					is_running = false;
+					break;
 				}
+
+				TranslateMessage(&message);
+				DispatchMessageW(&message);
 			}
+			
+			// Render frame at 120 FPS
+			Render(window);
+			
+			// Wait for target frame time (precise pacing)
+			Wait_For_Target_Frame_Time();
+		}
 		}
 	}
 	
