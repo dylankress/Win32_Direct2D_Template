@@ -16,6 +16,9 @@
 /src/build/.vs/
 /.vs/
 
+# Tracy
+/tracy/
+
 # Generic
 *.exe
 *.obj

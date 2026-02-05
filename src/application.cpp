@@ -20,6 +20,7 @@
 #include <dwrite.h>
 #include <stdio.h>
 #include <stdint.h>
+#include "profiling.h"
 #include "ui.cpp"
 #include "app_ui.h"
 
@@ -239,28 +240,30 @@ App_Measure_Text_Monospace(const char *text, int font_size)
 void
 Render_UI(UI_Render_List *render_list)
 {
+	PROFILE_ZONE;  // Auto-named "Render_UI"
+	
 	for (int i = 0; i < render_list->rect_count; i++)
-    {
-        const UI_Rectangle *src = &render_list->rectangles[i];
-
-        D2D1_RECT_F rect = D2D1::RectF(
-            (float)src->left,
-            (float)src->top,
-            (float)src->right,
-            (float)src->bottom
-        );
-
+	{
+		const UI_Rectangle *src = &render_list->rectangles[i];
+		
+		D2D1_RECT_F rect = D2D1::RectF(
+			(float)src->left,
+			(float)src->top,
+			(float)src->right,
+			(float)src->bottom
+		);
+		
 		uint32_t c = src->color;
-
+		
 		float a = ((c >> 24) & 0xFF) / 255.0f;
 		float r = ((c >> 16) & 0xFF) / 255.0f;
 		float g = ((c >>  8) & 0xFF) / 255.0f;
 		float b = ((c >>  0) & 0xFF) / 255.0f;
-
-        // If your color is 0xAARRGGBB, use the byte-based ColorF:
-        p_brush->SetColor(D2D1::ColorF(r, g, b, a));
-        p_render_target->FillRectangle(rect, p_brush);
-    }
+		
+		// If your color is 0xAARRGGBB, use the byte-based ColorF:
+		p_brush->SetColor(D2D1::ColorF(r, g, b, a));
+		p_render_target->FillRectangle(rect, p_brush);
+	}
 }
 
 
@@ -268,6 +271,8 @@ Render_UI(UI_Render_List *render_list)
 void
 Render_UI_Text(UI_Render_List *render_list)
 {
+	PROFILE_ZONE;  // Auto-named "Render_UI_Text"
+	
 	for (int i = 0; i < render_list->text_count; i++)
 	{
 		const UI_Text *src = &render_list->texts[i];
@@ -341,6 +346,8 @@ UI_Set_Cursor(HCURSOR cursor)
 void
 Wait_For_Target_Frame_Time()
 {
+	PROFILE_ZONE;  // Auto-named "Wait_For_Target_Frame_Time"
+	
 	// Calculate elapsed time this frame
 	LARGE_INTEGER current_time;
 	QueryPerformanceCounter(&current_time);
@@ -383,6 +390,8 @@ Wait_For_Target_Frame_Time()
 void
 Render(HWND window)
 {
+    PROFILE_ZONE;  // Profile entire render function
+    
     // Use frame timer's actual frame time
     float delta_time_ms = (float)g_frame_timer.actual_frame_time_ms;
     
@@ -403,67 +412,78 @@ Render(HWND window)
     g_ui_context.current_fps = g_frame_timer.actual_fps;
     
     // Build UI tree
-    App_UI_Build(&g_ui_context);
+    {
+        PROFILE_ZONE_N("UI Build");
+        App_UI_Build(&g_ui_context);
+    }
     
     // Layout (calculates panel rects)
     if (g_ui_context.state.panel_count > 0) {
+        PROFILE_ZONE_N("UI Layout");
         UI_Layout_Panel_Tree(&g_ui_context.state, 0);
     }
     
     // Update interaction (after layout, before render)
-    UI_Update_Interaction(&g_ui_context);
+    {
+        PROFILE_ZONE_N("UI Interaction");
+        UI_Update_Interaction(&g_ui_context);
+    }
     
     // Cursor selection based on hot widget and drag state
-    if (g_ui_context.interaction.dragging_divider != 0) {
-        // During drag, keep resize cursor
-        int divider_idx = -1;
-        for (int i = 0; i < g_ui_context.state.panel_count; i++) {
-            if (g_ui_context.state.panels[i].id == g_ui_context.interaction.dragging_divider) {
-                divider_idx = i;
-                break;
-            }
-        }
-        
-        if (divider_idx >= 0) {
-            UI_Panel *divider = &g_ui_context.state.panels[divider_idx];
-            if (divider->parent >= 0) {
-                UI_Panel *parent = &g_ui_context.state.panels[divider->parent];
-                if (parent->style.direction == UI_DIRECTION_ROW) {
-                    UI_Set_Cursor(g_cursor_size_we);
-                } else {
-                    UI_Set_Cursor(g_cursor_size_ns);
+    {
+        PROFILE_ZONE_N("Cursor Update");
+        if (g_ui_context.interaction.dragging_divider != 0) {
+            // During drag, keep resize cursor
+            int divider_idx = -1;
+            for (int i = 0; i < g_ui_context.state.panel_count; i++) {
+                if (g_ui_context.state.panels[i].id == g_ui_context.interaction.dragging_divider) {
+                    divider_idx = i;
+                    break;
                 }
             }
-        }
-    } else if (g_ui_context.interaction.hot_widget != 0) {
-        // Check if hot widget is a resizable divider
-        int hot_idx = -1;
-        for (int i = 0; i < g_ui_context.state.panel_count; i++) {
-            if (g_ui_context.state.panels[i].id == g_ui_context.interaction.hot_widget) {
-                hot_idx = i;
-                break;
-            }
-        }
-        
-        if (hot_idx >= 0 && g_ui_context.state.panels[hot_idx].style.resizable) {
-            UI_Panel *hot_panel = &g_ui_context.state.panels[hot_idx];
-            if (hot_panel->parent >= 0) {
-                UI_Panel *parent = &g_ui_context.state.panels[hot_panel->parent];
-                if (parent->style.direction == UI_DIRECTION_ROW) {
-                    UI_Set_Cursor(g_cursor_size_we);
-                } else {
-                    UI_Set_Cursor(g_cursor_size_ns);
+            
+            if (divider_idx >= 0) {
+                UI_Panel *divider = &g_ui_context.state.panels[divider_idx];
+                if (divider->parent >= 0) {
+                    UI_Panel *parent = &g_ui_context.state.panels[divider->parent];
+                    if (parent->style.direction == UI_DIRECTION_ROW) {
+                        UI_Set_Cursor(g_cursor_size_we);
+                    } else {
+                        UI_Set_Cursor(g_cursor_size_ns);
+                    }
                 }
+            }
+        } else if (g_ui_context.interaction.hot_widget != 0) {
+            // Check if hot widget is a resizable divider
+            int hot_idx = -1;
+            for (int i = 0; i < g_ui_context.state.panel_count; i++) {
+                if (g_ui_context.state.panels[i].id == g_ui_context.interaction.hot_widget) {
+                    hot_idx = i;
+                    break;
+                }
+            }
+            
+            if (hot_idx >= 0 && g_ui_context.state.panels[hot_idx].style.resizable) {
+                UI_Panel *hot_panel = &g_ui_context.state.panels[hot_idx];
+                if (hot_panel->parent >= 0) {
+                    UI_Panel *parent = &g_ui_context.state.panels[hot_panel->parent];
+                    if (parent->style.direction == UI_DIRECTION_ROW) {
+                        UI_Set_Cursor(g_cursor_size_we);
+                    } else {
+                        UI_Set_Cursor(g_cursor_size_ns);
+                    }
+                }
+            } else {
+                UI_Set_Cursor(g_cursor_arrow);
             }
         } else {
             UI_Set_Cursor(g_cursor_arrow);
         }
-    } else {
-        UI_Set_Cursor(g_cursor_arrow);
     }
     
     // Render
     if (g_ui_context.state.panel_count > 0) {
+        PROFILE_ZONE_N("UI Emit");
         UI_Emit_Panels(&g_ui_context.state, 0);
     }
 
@@ -696,7 +716,8 @@ WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR command_line, int
 			RECT client_rect;
 			GetClientRect(window, &client_rect);
 			HRESULT result = p_d2d_factory->CreateHwndRenderTarget(D2D1::RenderTargetProperties(),
-					D2D1::HwndRenderTargetProperties(window, D2D1::SizeU(client_rect.right - client_rect.left, client_rect.bottom - client_rect.top)),
+					D2D1::HwndRenderTargetProperties(window, D2D1::SizeU(client_rect.right - client_rect.left, client_rect.bottom - client_rect.top),
+					D2D1_PRESENT_OPTIONS_IMMEDIATELY),
 					&p_render_target);
 
 		if (SUCCEEDED(result))
@@ -800,7 +821,7 @@ WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR command_line, int
 	// Initialize frame timing system
 	QueryPerformanceFrequency(&g_frame_timer.frequency);
 	QueryPerformanceCounter(&g_frame_timer.frame_start);
-	g_frame_timer.target_fps = 240;
+	g_frame_timer.target_fps = 720;
 	g_frame_timer.target_frame_time_ms = 1000.0 / g_frame_timer.target_fps;
 	g_frame_timer.actual_fps = 0;
 	g_frame_timer.fps_update_timer = 0.0;
@@ -825,11 +846,13 @@ WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR command_line, int
 				DispatchMessageW(&message);
 			}
 			
-			Render(window);
-			
-			// Wait for target frame time (precise pacing)
-			Wait_For_Target_Frame_Time();
-		}
+		Render(window);
+		
+		// Wait for target frame time (precise pacing)
+		Wait_For_Target_Frame_Time();
+		
+		PROFILE_FRAME;  // Mark end of frame for Tracy profiler
+	}
 	}
 	
 	return 0;

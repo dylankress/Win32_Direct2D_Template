@@ -379,6 +379,289 @@ UI_Panel_Resizable(ui, "right", UI_DIRECTION_COLUMN, 320, -1, 12, 8, 0xFF22222A)
 **Current Performance:**
 Acceptable for typical UIs (<100 panels). Optimize only if profiling shows bottlenecks.
 
+### VSync Configuration
+
+**Location:** `application.cpp:699` - `CreateHwndRenderTarget` call
+
+**Development (uncapped FPS):**
+```c
+D2D1_PRESENT_OPTIONS_IMMEDIATELY  // No VSync, shows true performance
+```
+
+**Production (smooth rendering):**
+```c
+D2D1_PRESENT_OPTIONS_NONE  // Default VSync, no tearing
+```
+
+**Trade-offs:**
+- VSync OFF: Higher FPS, visible tearing, useful for profiling
+- VSync ON: Monitor-capped FPS, smooth visuals, lower power usage
+
+## Tracy Profiler Integration
+
+**Status:** Fully integrated for real-time performance profiling in development builds
+
+Tracy is a real-time, nanosecond resolution frame profiler that provides deep insights into application performance. The integration includes 10 instrumented zones covering the entire render pipeline.
+
+**Tracy Version:** v0.13.1+ (protocol 77)  
+**Location:** `/tracy/` (git submodule/clone, excluded from project git via .gitignore)
+
+### Initial Setup - Building Tracy Profiler
+
+**IMPORTANT:** The Tracy profiler executable must match the protocol version of the Tracy library compiled into your application. Version mismatches will cause connection failures.
+
+**Prerequisites:**
+- CMake 3.20+ (download from https://cmake.org/download/)
+- Visual Studio 2022 (for building)
+- Tracy repository cloned to project root
+
+**Build Tracy Profiler from Source:**
+
+```bash
+# Navigate to Tracy profiler directory
+cd tracy/profiler
+
+# Create build directory
+mkdir build
+cd build
+
+# Generate build files with CMake
+cmake .. -G "Visual Studio 17 2022" -A x64
+
+# Build release version (takes 5-10 minutes first time)
+cmake --build . --config Release
+
+# Copy to convenient location
+copy Release\Tracy.exe C:\Dev\Tracy\tracy-profiler.exe
+```
+
+**Why build from source?** The Tracy repository is frequently updated, and protocol versions change between releases. Building the profiler from the same source tree as the library guarantees compatibility.
+
+**Alternative - Download Prebuilt:**
+If you prefer not to build from source, download from https://github.com/wolfpld/tracy/releases, but ensure the version matches your cloned Tracy repository. Check protocol version compatibility if connection fails.
+
+### Building Application with Profiling
+
+Use the dedicated profile build script:
+```bash
+cd src
+build_profile.bat
+```
+
+**Build configuration details:**
+- **Optimization:** `/O2` - Full release-mode optimization for realistic performance measurement
+- **Debug symbols:** `/Zi` - Enables Tracy symbol resolution and function name display
+- **Tracy enabled:** `/DTRACY_ENABLE` - Activates all profiling macros
+- **ETW disabled:** `/DTRACY_NO_SYSTEM_TRACING` - Prevents Windows SDK compatibility issues with Tracy's ETW integration
+- **Tracy source:** `..\..\tracy\public\TracyClient.cpp` - Compiled directly into application
+- **Networking:** `ws2_32.lib` - Required for Tracy's network protocol
+
+**Build output:**
+- Fully optimized executable with embedded Tracy client
+- ~30-60 second compile time (Tracy compilation adds overhead)
+- Zero profiling overhead when built without `/DTRACY_ENABLE`
+
+**Note:** Must be run from **Visual Studio Developer Command Prompt** to have `cl.exe` in PATH.
+
+### Running with Tracy
+
+**1. Build profiled version:**
+```bash
+cd src
+build_profile.bat
+```
+
+**2. Launch application:**
+```bash
+cd build
+application.exe
+```
+
+**Expected behavior:**
+- Application runs normally with full optimization
+- Waits on port 8086 for Tracy profiler connection
+- UI renders at target FPS (240 Hz by default)
+
+**3. Launch Tracy profiler:**
+```bash
+C:\Dev\Tracy\tracy-profiler.exe
+```
+
+**Expected:**
+- Tracy GUI window opens
+- Shows "Connect to..." dialog or list of available clients
+
+**4. Connect to application:**
+- Click **"Connect"** button in Tracy
+- Application should appear in discovery list (if on same machine)
+- Or manually enter: `localhost` or `127.0.0.1`
+- Click application entry to establish connection
+
+**Connection success indicators:**
+- Status changes to "Connected"
+- Frame timeline starts populating at top of window
+- Profiling zones appear in hierarchical timeline view
+- Statistics panel shows live frame timing data
+- FPS counter updates in real-time
+
+### Profiling Zones (Level 1)
+
+**Currently instrumented zones (10 total):**
+- `FrameMark` - End of each frame (line 852, application.cpp)
+- `Render` - Main render function (line 387, application.cpp)
+- `UI Build` - Panel tree construction (line 410, application.cpp)
+- `UI Layout` - Layout calculation (line 416, application.cpp)
+- `UI Interaction` - Input processing (line 422, application.cpp)
+- `Cursor Update` - Cursor selection logic (line 427, application.cpp)
+- `UI Emit` - Render list generation (line 481, application.cpp)
+- `Render_UI` - Rectangle rendering (line 243, application.cpp)
+- `Render_UI_Text` - Text rendering (line 274, application.cpp)
+- `Wait_For_Target_Frame_Time` - Frame pacing (line 349, application.cpp)
+
+**Total zones:** 10 (Level 1 instrumentation)
+
+### Profiling Macro Wrappers
+
+Tracy macros are wrapped in `profiling.h` for easy disable:
+
+| Wrapper Macro | Tracy Macro | Usage |
+|---------------|-------------|-------|
+| `PROFILE_FRAME` | `FrameMark` | End of frame loop |
+| `PROFILE_ZONE` | `ZoneScoped` | Auto-named function zone |
+| `PROFILE_ZONE_N(name)` | `ZoneScopedN(name)` | Custom-named zone |
+| `PROFILE_ZONE_C(color)` | `ZoneScopedC(color)` | Colored zone |
+| `PROFILE_TEXT(text, size)` | `ZoneText(text, size)` | Add text to zone |
+
+**Example - Adding new zone:**
+```c
+void My_Function() {
+    PROFILE_ZONE;  // Auto-named "My_Function"
+    // ... code
+}
+
+// Or with custom name:
+void Complex_Function() {
+    {
+        PROFILE_ZONE_N("Phase 1: Setup");
+        // ... setup code
+    }
+    {
+        PROFILE_ZONE_N("Phase 2: Processing");
+        // ... processing code
+    }
+}
+```
+
+### Performance Impact of Tracy
+
+**Tracy overhead per zone:** ~20-50ns (negligible)  
+**Network overhead:** ~0.1ms per frame (sends data to profiler)  
+**Memory overhead:** ~16MB buffer for frame history
+
+**Note:** Tracy overhead is only present when compiled with `/DTRACY_ENABLE`. Regular builds (build.bat) have zero overhead.
+
+### Maintaining Tracy Version
+
+**Updating Tracy library:**
+```bash
+cd tracy
+git pull origin master
+cd ../src
+build_profile.bat  # Rebuild application with updated Tracy
+```
+
+**Important:** After updating Tracy, rebuild the profiler to maintain protocol compatibility:
+```bash
+cd tracy/profiler/build
+cmake --build . --config Release
+copy Release\Tracy.exe C:\Dev\Tracy\tracy-profiler.exe
+```
+
+**Version checking:**
+- Tracy library version is embedded in compiled application
+- Profiler shows its protocol version on connection attempt
+- Protocol mismatch errors indicate version incompatibility
+
+**Best practice:** Keep Tracy library and profiler in sync by rebuilding both when updating.
+
+### Expanding Instrumentation
+
+To add more profiling zones (Level 2+):
+
+**High-value zones to add:**
+- `UI_Layout_Row()` and `UI_Layout_Column()` in ui.cpp
+- `UI_New_Panel()` - panel creation cost
+- `UI_Update_Divider_Resize()` - resize logic
+- DirectWrite text measurement loops
+- Size override lookups
+
+**Add with:**
+```c
+PROFILE_ZONE;  // At start of function
+```
+
+### Interpreting Tracy Data
+
+**Note:** For accurate profiling, ensure VSync is disabled (`D2D1_PRESENT_OPTIONS_IMMEDIATELY` in application.cpp line 699). With VSync enabled, frame times will be capped at monitor refresh rate regardless of actual rendering performance.
+
+**Key metrics to check (240 FPS target = 4.16ms budget):**
+
+| Zone | Expected Time |
+|------|---------------|
+| **Render** (total) | ~3.0-3.5ms |
+| UI Build | ~0.1-0.3ms |
+| UI Layout | ~0.05-0.15ms |
+| UI Interaction | ~0.05-0.1ms |
+| UI Emit | ~0.05-0.1ms |
+| Render_UI | ~0.1-0.3ms |
+| Render_UI_Text | ~0.2-0.5ms |
+| Cursor Update | ~0.01-0.02ms |
+| Wait_For_Target_Frame_Time | Variable (fills remaining time) |
+
+**Red flags:**
+- ⚠️ Any single zone taking >50% of frame time
+- ⚠️ Frame times spiking irregularly
+- ⚠️ Text rendering taking >0.5ms consistently
+
+### Troubleshooting
+
+**Protocol version mismatch (most common issue):**
+- **Error:** "Incompatible protocol - application uses X, profiler requires Y"
+- **Cause:** Tracy profiler executable doesn't match Tracy library version
+- **Solution:** Rebuild Tracy profiler from your cloned Tracy repository:
+  ```bash
+  cd tracy/profiler/build
+  cmake --build . --config Release
+  copy Release\Tracy.exe C:\Dev\Tracy\tracy-profiler.exe
+  ```
+- **Prevention:** Always rebuild profiler after updating Tracy repository (`git pull`)
+
+**Application doesn't appear in Tracy:**
+- Check firewall isn't blocking port 8086
+- Verify application was built with `build_profile.bat`
+- Ensure Tracy profiler is running before or shortly after application launch
+
+**Build errors:**
+- **Missing `cl.exe`:** Run from Visual Studio Developer Command Prompt
+- **Tracy ETW errors:** Ensure `/DTRACY_NO_SYSTEM_TRACING` flag is present in `build_profile.bat`
+- **Linker errors about winsock:** Verify `ws2_32.lib` in link line
+- **Static assertion failed in TracyETW.cpp:** Already fixed with `/DTRACY_NO_SYSTEM_TRACING` flag
+
+**High overhead / slow performance:**
+- Normal - profiling adds ~5-10% overhead
+- Disconnect profiler to remove network overhead
+- Rebuild with regular `build.bat` for production performance
+
+**Missing zones:**
+- Check `#include "profiling.h"` is present in application.cpp
+- Verify `/DTRACY_ENABLE` in build_profile.bat
+- Ensure zone is inside a called code path (not dead code)
+
+**CMake not found when building profiler:**
+- Install CMake from https://cmake.org/download/
+- Ensure "Add CMake to PATH" is checked during installation
+- Restart terminal/command prompt after installation
+
 ## Known Limitations
 
 - **No tests:** Consider adding a test framework if project grows
